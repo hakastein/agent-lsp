@@ -1,10 +1,10 @@
-// Package php reads one PHP file into the facts the index stores: method declarations and method calls whose
+// Package facts reads one PHP file into the facts the index stores: method declarations and method calls whose
 // receiver class is known. The rules are those of docs/adr/0001-workspace-index-on-disk.md; in short:
 // `(new X)->m()` anywhere; `$x->m()` only in a function, method or closure body where every write to `$x` is
 // `new X` of one class, the first of them before the call, and nothing else can bind `$x`; a variable an arrow
 // function or a `use` capture takes is known when the chain of captures, followed outward, comes from such a body.
 // A top-level variable and a superglobal are never known.
-package php
+package facts
 
 import (
 	"slices"
@@ -27,7 +27,7 @@ type Method struct {
 }
 
 // Call is a method call whose receiver class is known: `(new X)->m()`, or `$x->m()` in a function, method or
-// closure body where nothing can bind `$x` to anything but `new X`. It becomes a Reference only when X declares m.
+// closure body where nothing can bind `$x` to anything but `new X`. It becomes a use only when X declares m.
 type Call struct {
 	Key  string // MethodKey of the receiver class and the called name
 	Name Range  // the method name at the call site
@@ -566,7 +566,7 @@ func (s *scope) spoil(name string) {
 }
 
 // classOf is the class of variable name at byte offset at; "" when the class is not known. A variable of the
-// top level is never known: `include`, `global` and `$GLOBALS` in any file, also one the Workspace does not index,
+// top level is never known: `include`, `global` and `$GLOBALS` in any file, also one the index does not hold,
 // may write it.
 func (s *scope) classOf(name string, at int) string {
 	if s.top || s.dynamic {

@@ -1,4 +1,4 @@
-package main_test
+package php_test
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// The syntax Workspace holds valid PHP that the parser must not lose: a class named Enum and its subclass, strings
+// The syntax root holds valid PHP that the parser must not lose: a class named Enum and its subclass, strings
 // with the b prefix, and a real enum next to them.
 var (
 	enumLabel  = place{"src/Shop/Enum.php", "label(string $lang)"}
@@ -24,9 +24,9 @@ var (
 )
 
 func TestSyntaxDefinition(t *testing.T) {
-	root := workspace(t, "syntax")
-	c := start(t, cache(t))
-	c.initialize(root)
+	cache(t)
+	root := newRoot(t, "syntax")
+	ix, _ := open(t, root)
 
 	tests := []struct {
 		name string
@@ -42,16 +42,15 @@ func TestSyntaxDefinition(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.ElementsMatch(t, locations(t, root, tt.want), definition(c, root, tt.at))
+			assert.ElementsMatch(t, locations(t, root, tt.want), definition(t, ix, root, tt.at))
 		})
 	}
-	c.stop()
 }
 
 func TestSyntaxReferences(t *testing.T) {
-	root := workspace(t, "syntax")
-	c := start(t, cache(t))
-	c.initialize(root)
+	cache(t)
+	root := newRoot(t, "syntax")
+	ix, _ := open(t, root)
 
 	tests := []struct {
 		name string
@@ -64,8 +63,7 @@ func TestSyntaxReferences(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.ElementsMatch(t, locations(t, root, tt.want), references(c, root, tt.at, false))
+			assert.ElementsMatch(t, locations(t, root, tt.want), uses(t, ix, root, tt.at))
 		})
 	}
-	c.stop()
 }
