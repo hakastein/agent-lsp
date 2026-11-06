@@ -4,7 +4,6 @@
 package php
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -20,11 +19,11 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
-	"syscall"
 
 	_ "modernc.org/sqlite"
 
 	agentlsp "github.com/hakastein/agent-lsp"
+	"github.com/hakastein/agent-lsp/internal/position"
 	"github.com/hakastein/agent-lsp/php/internal/facts"
 )
 
@@ -268,33 +267,12 @@ func broken(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSymlinkLoop)
 }
 
-// errNotRegular is the error of reading a name that is not a regular file.
-var errNotRegular = errors.New("not a regular file")
-
-// readFile reads a regular file. The file is opened without blocking and checked after opening, so a name that
-// has become a named pipe, a socket or a device by then is not read: the error is errNotRegular.
-func readFile(name string) ([]byte, error) {
-	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s: %w", name, errNotRegular)
-	}
-	return io.ReadAll(f)
-}
-
 // snapshotFile reads the file p under root and hashes it for the snapshot. A name that is no longer a regular file
 // is logged and is not part of the snapshot: ok is false. Any other error is returned: the snapshot cannot be known
 // without the file.
 func snapshotFile(root, p string, logf func(string, ...any)) (src []byte, sum [sha256.Size]byte, ok bool, err error) {
-	src, err = readFile(filepath.Join(root, filepath.FromSlash(p)))
-	if errors.Is(err, errNotRegular) {
+	src, err = position.ReadFile(filepath.Join(root, filepath.FromSlash(p)))
+	if errors.Is(err, position.ErrNotRegular) {
 		logf("php: skip %s: %v", p, err)
 		return nil, sum, false, nil
 	}
@@ -434,17 +412,22 @@ func insert(stmt *sql.Stmt, key string, file int64, r facts.Range) error {
 }
 
 // Definition is the declarations of the Symbol at pos: the one a link there points to, or the one declared there.
-// A place in a file of the root where no Symbol is has none. A position that is not such a place is an error that
-// repeats pos and names the problem: a relative path, a file outside the root or one that does not exist, a line
-// or a column outside the file. The file is read as it is on disk; a column may stand right after the last byte
-// of its line.
-func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Location, error) {
+// Each is the name of the method; its Range is the name too, and it has no Signature and no Doc. A place in a file
+// of the root where no Symbol is has none. A position that is not such a place is an error that repeats pos and
+// names the problem: a relative path, a file outside the root or one that does not exist, a line or a column
+// outside the file. The file is read as it is on disk; a column may stand right after the last byte of its line.
+func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Declaration, error) {
 	key, err := ix.symbolAt(pos)
 	if err != nil || key == "" {
 		return nil, err
 	}
-	return ix.locations(`SELECT f.path, s.sl, s.sc, s.el, s.ec FROM symbols s JOIN files f ON f.id = s.file
+	names, err := ix.locations(`SELECT f.path, s.sl, s.sc, s.el, s.ec FROM symbols s JOIN files f ON f.id = s.file
 		WHERE s.key = ? ORDER BY f.path, s.sl, s.sc`, key)
+	var out []agentlsp.Declaration
+	for _, name := range names {
+		out = append(out, agentlsp.Declaration{Location: name, Range: name})
+	}
+	return out, err
 }
 
 // References is every link to the Symbol at pos, in Uses. There is no hierarchy, so Implementations is empty, and
@@ -498,31 +481,13 @@ func (ix *Index) symbolAt(pos agentlsp.Position) (string, error) {
 }
 
 // place is the path of the file of pos relative to the root, with forward slashes, or what makes pos no place in a
-// file of the root. The line break of a line, \n or \r\n, is not a column of it.
+// file of the root (position.Check).
 func (ix *Index) place(pos agentlsp.Position) (string, error) {
-	if !filepath.IsAbs(pos.File) {
-		return "", errors.New("the path is not absolute")
-	}
-	rel, err := filepath.Rel(ix.root, pos.File)
-	if err != nil || !filepath.IsLocal(rel) {
-		return "", errors.New("the file is not under the root")
-	}
-	src, err := readFile(pos.File)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", errors.New("the file does not exist")
-	}
-	if err != nil {
+	if _, err := position.Check(ix.root, pos); err != nil {
 		return "", err
 	}
-	lines := bytes.Split(src, []byte("\n"))
-	if pos.Line < 1 || pos.Line > len(lines) {
-		return "", fmt.Errorf("no line %d: the file has lines 1 to %d", pos.Line, len(lines))
-	}
-	end := len(bytes.TrimSuffix(lines[pos.Line-1], []byte("\r"))) + 1
-	if pos.Column < 1 || pos.Column > end {
-		return "", fmt.Errorf("no column %d: line %d has columns 1 to %d", pos.Column, pos.Line, end)
-	}
-	return filepath.ToSlash(rel), nil
+	rel, err := filepath.Rel(ix.root, pos.File)
+	return filepath.ToSlash(rel), err
 }
 
 func (ix *Index) locations(q, key string) ([]agentlsp.Location, error) {

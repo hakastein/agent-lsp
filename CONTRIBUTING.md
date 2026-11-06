@@ -21,7 +21,8 @@ Everything builds with `CGO_ENABLED=0`. CI runs the same target on every push an
 ## Tests
 
 - The seam is the exported API: a test opens the index of a root with the language package's `Open`, asks a
-  question and checks the places in the answer or the error. Tests do not read the SQLite tables of the index.
+  question and checks the places in the answer or the error. Tests do not read the SQLite tables of the index;
+  only the test of `internal/cachedb`, which sweeps the tables, does.
 - Every test gets its own cache directory, so indexes of tests never meet.
 - Fixtures are small files in the language package's `testdata/`; a test finds a place in a file by a unique
   substring.
@@ -31,6 +32,7 @@ Everything builds with `CGO_ENABLED=0`. CI runs the same target on every push an
 ## Pull requests
 
 - One change per pull request, against `main`, from a branch `issue-<N>`.
-- Borrowed code keeps its authors' notice.
+- Borrowed code keeps its authors' notice. `internal/gopls` is a fork of gopls: a change there is listed in
+  [`internal/gopls/FORK.md`](internal/gopls/FORK.md) in the same pull request.
 - `make go` passes.
 - A release is a tag `vX.Y.Z` with a section `## vX.Y.Z` in `CHANGELOG.md`.

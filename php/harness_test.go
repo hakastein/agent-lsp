@@ -112,11 +112,18 @@ func locations(t *testing.T, root string, places []place) []agentlsp.Location {
 	return out
 }
 
+// definition is the names of the declarations Definition(at) answers; the test fails when a declaration has more
+// than its name.
 func definition(t *testing.T, ix *php.Index, root string, at place) []agentlsp.Location {
 	t.Helper()
 	found, err := ix.Definition(at.position(t, root))
 	require.NoError(t, err)
-	return found
+	var names []agentlsp.Location
+	for _, d := range found {
+		require.Equal(t, agentlsp.Declaration{Location: d.Location, Range: d.Location}, d)
+		names = append(names, d.Location)
+	}
+	return names
 }
 
 // uses is References(at).Uses; the test fails when References answers anything else.

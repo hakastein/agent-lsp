@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.0
+
+- Пакет `golang`: Go-код корня — модуля или `go.work`. `Definition` (в том числе в стандартную библиотеку и
+  зависимости), `Symbols` по имени с квалификатором (`pkg.Func`, `Type.Method`, `pkg.Type.Method`, путь пакета) и по
+  голому имени, `Outline` файла. `References` и `Rename` возвращают `ErrNotSupported`.
+- Ответы Go даёт форк внутренних пакетов gopls v0.23.0 (BSD-3) в `internal/gopls`, без протокола LSP; правки
+  перечислены в `internal/gopls/FORK.md`.
+- Кэш пользователя — одна база `<кэш пользователя>/agent-lsp/cache.sqlite` для всех языков: кэш gopls и загрузки
+  пакетов Go. `go list` повторяется только при изменении `go.mod`, `go.sum`, `go.work`, состава `.go`-файлов или их
+  импортов; строки без использования 14 дней удаляются попутно.
+- `Definition` возвращает `[]agentlsp.Declaration`: место имени, диапазон объявления, сигнатуру, докблок и
+  происхождение (`Origin`: корень, std, module, vendor). PHP заполняет место имени.
+- `agentlsp.Symbol` — имя, вид, контейнер и объявление.
+- Зависимости: `golang.org/x/tools`, `golang.org/x/mod`, `golang.org/x/sync`.
+
 ## v0.1.0
 
 - Модуль `github.com/hakastein/agent-lsp` — Go-библиотека: программа импортирует её и спрашивает напрямую, без
