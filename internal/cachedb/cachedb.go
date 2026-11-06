@@ -4,9 +4,11 @@
 package cachedb
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -33,10 +35,18 @@ func Path() (string, error) {
 	return filepath.Join(cache, "agent-lsp", "cache.sqlite"), nil
 }
 
+// DB is the cache database Open opened.
+type DB struct {
+	*sql.DB
+	file string
+	gen  []byte // the content of the lock file at Open; it changes whenever the database file is removed
+}
+
 // Open opens the cache database, runs schema (statements that must be idempotent, such as CREATE TABLE IF NOT
 // EXISTS) and sweeps the tables when the last sweep is older than a day. A file that is not a database or is
-// damaged is made again: what the cache holds can be computed again.
-func Open(schema string) (*sql.DB, error) {
+// damaged is made again: what the cache holds can be computed again. Processes open the database one at a time,
+// under the lock of the file <Path()>.lock.
+func Open(schema string) (*DB, error) {
 	file, err := Path()
 	if err != nil {
 		return nil, err
@@ -44,25 +54,82 @@ func Open(schema string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		return nil, err
 	}
+	lock, gen, err := lockDB(file)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
 	db, err := open(file, schema)
-	if broken(err) {
-		for _, f := range []string{file, file + "-wal", file + "-shm"} {
-			if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return nil, err
-			}
+	if Damaged(err) {
+		if gen, err = remove(lock, file); err != nil {
+			return nil, err
 		}
 		db, err = open(file, schema)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
-	return db, nil
+	return &DB{DB: db, file: file, gen: gen}, nil
 }
 
-// broken reports whether err says that the database file is not a database or is damaged.
-func broken(err error) bool {
+// CloseAfter closes db after err and returns what is left of err with the error of closing. An err that says the
+// database is damaged removes the database file, so that the next Open makes a new one; an err after the file was
+// made again since db was opened is of a file that no Open opens again. Both are dropped, and the damaged file is
+// removed only when it was not made again.
+func (db *DB) CloseAfter(err error) error {
+	closeErr := db.Close()
+	if err == nil {
+		return closeErr
+	}
+	lock, gen, lockErr := lockDB(db.file)
+	if lockErr != nil {
+		return errors.Join(err, closeErr, lockErr)
+	}
+	defer lock.Close()
+	if !bytes.Equal(gen, db.gen) {
+		return closeErr
+	}
+	if Damaged(err) {
+		_, err = remove(lock, db.file)
+	}
+	return errors.Join(err, closeErr)
+}
+
+// Damaged reports whether err says that the database file is not a database or is damaged.
+func Damaged(err error) bool {
 	var e *sqlite.Error
 	return errors.As(err, &e) && (e.Code()&0xff == sqlite3.SQLITE_NOTADB || e.Code()&0xff == sqlite3.SQLITE_CORRUPT)
+}
+
+// lockDB waits for the lock of the database file and returns the lock file, which its Close releases, and the
+// content of the lock file.
+func lockDB(file string) (*os.File, []byte, error) {
+	lock, err := os.OpenFile(file+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := lockFile(lock); err != nil {
+		lock.Close()
+		return nil, nil, err
+	}
+	gen, err := io.ReadAll(lock)
+	if err != nil {
+		lock.Close()
+		return nil, nil, err
+	}
+	return lock, gen, nil
+}
+
+// remove removes the database file under the lock and writes a new content of the lock file, which it returns.
+func remove(lock *os.File, file string) ([]byte, error) {
+	for _, f := range []string{file, file + "-wal", file + "-shm"} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+	}
+	gen := fmt.Appendf(nil, "%016x", time.Now().UnixNano())
+	_, err := lock.WriteAt(gen, 0)
+	return gen, err
 }
 
 func open(file, schema string) (*sql.DB, error) {

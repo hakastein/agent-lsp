@@ -370,6 +370,26 @@ func TestCloseTwice(t *testing.T) {
 	assert.NoError(t, ix.Close())
 }
 
+// A cache database damaged where the cache is not read at its opening is found by the load of packages: the call
+// still answers, from a cache database made again, which the next call reuses.
+func TestDamagedCache(t *testing.T) {
+	cache(t)
+	root := newRoot(t)
+	call := place{"main.go", "Add(cart.Item"}
+	var got []agentlsp.Declaration
+	ask := func(ix *golang.Index) {
+		var err error
+		got, err = ix.Definition(call.position(t, root))
+		require.NoError(t, err)
+	}
+	session(t, root, ask)
+	damage(t)
+
+	session(t, root, ask)
+	assert.Equal(t, declarations(t, root, []decl{add}), got)
+	assert.Contains(t, session(t, root, ask), reused)
+}
+
 func TestNotSupported(t *testing.T) {
 	cache(t)
 	root := newRoot(t)

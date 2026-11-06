@@ -91,7 +91,14 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
 - Two worktrees of one module share the entries of the standard library and the module cache; each computes the
   packages of its own files once, since gopls keys and export data hold file paths.
 - An entry not used for 14 days is deleted along the way. A cache file that is not an SQLite database or is damaged
-  is made again; any other error of opening it fails `Open`.
+  is made again: what it holds can be computed again. Damage that `Open` of the file does not see is found later by
+  a read or a write. When `Open` finds it, `Open` makes the file again and goes on. When the gopls cache finds it,
+  the read is a miss; when a later load of packages does, that question fails. Either way `Close` removes the file,
+  and the next call makes it again. A file that another process has already made again is not removed, and a
+  read or a write that failed on the old file is not an error: `Open` opens again, `Close` drops what was not
+  written. Any other error of opening the file fails `Open`.
+- Processes open, make and remove the cache file one at a time, under the lock of `agent-lsp/cache.sqlite.lock` next
+  to it: calls that start at once on a missing or damaged file all succeed.
 - The diagnostic lines say whether the packages were loaded or reused and how many cache entries were reused,
   missed and written.
 
@@ -150,8 +157,8 @@ return types or PHPDoc.
 - `Open` builds the index of the root or reuses it, and answers come from the files as they were at `Open`. It
   compares the files under the root (path and content hash of every `.php` file) with the ones the index was built
   from: if they are the same, the index is used as it is; otherwise it is built again as a whole.
-- The index is one SQLite file per root under the user's cache directory (`os.UserCacheDir()`) in `agent-lsp/php/`,
-  apart from the cache file of Go.
+- The index is one SQLite file per root under the user's cache directory (`os.UserCacheDir()`) in `agent-lsp/php/`.
+  It is not `agent-lsp/cache.sqlite`, the file Go keeps its cache in.
 - Symbolic links to files and directories are followed, also outside the root; a file is named by its path through
   the link, and a directory already on the path from the root is not walked again. Only regular files are read.
 - Skipped on purpose, and only these: an entry that is not a regular file (a named pipe, a socket, a device), a

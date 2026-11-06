@@ -1,6 +1,7 @@
 package golang_test
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	agentlsp "github.com/hakastein/agent-lsp"
 	"github.com/hakastein/agent-lsp/golang"
+	"github.com/hakastein/agent-lsp/internal/cachedb"
 )
 
 // newRoot copies testdata (the module shop and the module money it replaces with a directory) into a fresh
@@ -42,6 +44,21 @@ func cache(t *testing.T) {
 	for _, name := range []string{"HOME", "XDG_CACHE_HOME", "LOCALAPPDATA"} {
 		t.Setenv(name, home)
 	}
+}
+
+// damage overwrites the cache database from its third page (of SQLite's default 4096 bytes) on, past the schema and
+// the bookkeeping of the cache, with bytes that are no page of SQLite.
+func damage(t *testing.T) {
+	t.Helper()
+	file, err := cachedb.Path()
+	require.NoError(t, err)
+	f, err := os.OpenFile(file, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	info, err := f.Stat()
+	require.NoError(t, err)
+	_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, int(info.Size())-2*4096), 2*4096)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
 }
 
 // session opens root, passes the index to ask and closes it; it returns the diagnostic lines of the index. A
