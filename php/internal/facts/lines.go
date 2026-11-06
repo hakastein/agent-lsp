@@ -1,26 +1,24 @@
-package php
+package facts
 
 import (
 	"sort"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/VKCOM/php-parser/pkg/position"
 )
 
-// Position is an LSP position: zero-based line and UTF-16 code unit offset in the line.
+// Position is a place in a file: a 1-based line and a 1-based column in bytes.
 type Position struct {
-	Line      int
-	Character int
+	Line   int
+	Column int
 }
 
-// Range is an LSP range; End is exclusive.
+// Range is a range in a file; End is exclusive.
 type Range struct {
 	Start Position
 	End   Position
 }
 
-// lines turns byte offsets of a file into LSP positions.
+// lines turns byte offsets of a file into positions.
 type lines struct {
 	src    []byte
 	starts []int // byte offset of each line start
@@ -43,11 +41,5 @@ func (l lines) span(p *position.Position) Range {
 func (l lines) at(offset int) Position {
 	offset = min(max(offset, 0), len(l.src))
 	line := sort.Search(len(l.starts), func(i int) bool { return l.starts[i] > offset }) - 1
-	units := 0
-	for b := l.src[l.starts[line]:offset]; len(b) > 0; {
-		r, size := utf8.DecodeRune(b)
-		units += utf16.RuneLen(r) // an invalid byte decodes to U+FFFD, one unit
-		b = b[size:]
-	}
-	return Position{Line: line, Character: units}
+	return Position{Line: line + 1, Column: offset - l.starts[line] + 1}
 }

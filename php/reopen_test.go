@@ -1,4 +1,4 @@
-package main_test
+package php_test
 
 import (
 	"os"
@@ -9,36 +9,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Whether a process built the index or reused it is seen through the diagnostic lines phplslow writes to stderr.
-// They are not a protocol; these tests are their only reader.
-const (
-	built  = "phplslow: index built: "
-	reused = "phplslow: index reused: "
-)
-
-func TestRestartReusesTheIndex(t *testing.T) {
-	root, home := workspace(t, "methods"), cache(t)
+func TestReopenReusesTheIndex(t *testing.T) {
+	cache(t)
+	root := workspace(t, "methods")
 	call := place{"src/Shop/Checkout.php", "add('apple')"}
 
-	first := start(t, home)
-	first.initialize(root)
-	wantDefinition, wantReferences := definition(first, root, call), references(first, root, call, true)
-	first.stop()
-
-	second := start(t, home)
-	second.initialize(root)
-	gotDefinition, gotReferences := definition(second, root, call), references(second, root, call, true)
-	second.stop()
+	first, firstLog := open(t, root)
+	wantDefinition, wantUses := definition(t, first, root, call), uses(t, first, root, call)
+	second, secondLog := open(t, root)
+	gotDefinition, gotUses := definition(t, second, root, call), uses(t, second, root, call)
 
 	assert.Equal(t, wantDefinition, gotDefinition)
-	assert.Equal(t, wantReferences, gotReferences)
-	assert.NotEmpty(t, gotReferences)
-	assert.Contains(t, first.stderr.String(), built)
-	assert.Contains(t, second.stderr.String(), reused)
-	assert.NotContains(t, second.stderr.String(), built)
+	assert.Equal(t, wantUses, gotUses)
+	assert.NotEmpty(t, gotUses)
+	assert.Contains(t, firstLog, built)
+	assert.Contains(t, secondLog, reused)
+	assert.NotContains(t, secondLog, built)
 }
 
-func TestRestartAfterAChangeAnswersFromTheDisk(t *testing.T) {
+func TestReopenAfterAChangeAnswersFromTheDisk(t *testing.T) {
 	tests := []struct {
 		name   string
 		change func(t *testing.T, root string)
@@ -50,22 +39,29 @@ func TestRestartAfterAChangeAnswersFromTheDisk(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root, home := workspace(t, "methods"), cache(t)
-			first := start(t, home)
-			first.initialize(root)
-			references(first, root, cartAdd, false)
-			first.stop()
+			cache(t)
+			root := workspace(t, "methods")
+			first, _ := open(t, root)
+			uses(t, first, root, cartAdd)
 
 			tt.change(t, root)
-			second := start(t, home)
-			second.initialize(root)
-			got := references(second, root, cartAdd, false)
-			second.stop()
+			second, log := open(t, root)
 
-			assert.ElementsMatch(t, locations(t, root, tt.want), got)
-			assert.Contains(t, second.stderr.String(), built)
+			assert.ElementsMatch(t, locations(t, root, tt.want), uses(t, second, root, cartAdd))
+			assert.Contains(t, log, built)
 		})
 	}
+}
+
+// The user's cache directory is a regular file: no index can be opened under it.
+func TestOpenFailsWithoutACacheDirectory(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	require.NoError(t, os.WriteFile(home, nil, 0o600))
+	cacheAt(t, home)
+
+	_, _, err := tryOpen(t, workspace(t, "methods"))
+
+	assert.Error(t, err)
 }
 
 func appendToApp(t *testing.T, root string) {

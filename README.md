@@ -1,15 +1,54 @@
-# phplslow
+# agent-lsp
 
-[![CI](https://github.com/hakastein/phplslow/actions/workflows/ci.yml/badge.svg)](https://github.com/hakastein/phplslow/actions/workflows/ci.yml)
+[![CI](https://github.com/hakastein/agent-lsp/actions/workflows/ci.yml/badge.svg)](https://github.com/hakastein/agent-lsp/actions/workflows/ci.yml)
 
-phplslow is a PHP language server written in Go. A client starts it and speaks the
-[Language Server Protocol](https://microsoft.github.io/language-server-protocol/) over stdin and stdout. phplslow
-indexes the PHP files of the workspace into SQLite on disk and answers from that index.
+agent-lsp is a Go library that answers questions about code: where a symbol is declared, where it is used, how to
+rename it. A program imports it and calls it directly: no server, no daemon, no subprocess. The index lives in SQLite
+on disk (`modernc.org/sqlite`, no CGO).
 
-## What it answers
+## API
 
-- `textDocument/definition` and `textDocument/references` for a method call whose receiver class is known from the
-  code around it:
+The root package `github.com/hakastein/agent-lsp` holds the types every language shares. Each language is a package
+of its own with an `Open` function; the index it returns has the same methods in every language, so a consumer
+declares one interface for them and picks the package by the file extension.
+
+```go
+import (
+	agentlsp "github.com/hakastein/agent-lsp"
+	"github.com/hakastein/agent-lsp/php"
+)
+
+ix, err := php.Open(root, nil) // builds the index of root or reuses it
+if err != nil {
+	return err
+}
+defer ix.Close()
+
+pos := agentlsp.Position{File: "/abs/path/src/app.php", Line: 12, Column: 9}
+decls, err := ix.Definition(pos)
+refs, err := ix.References(pos) // refs.Uses, refs.Implementations, refs.Unresolved
+```
+
+| Method | Answer |
+|---|---|
+| `Definition(Position)` | the declarations of the symbol at the position |
+| `References(Position)` | its uses and implementations, in separate lists, and the places with its name that were not resolved |
+| `Rename(Position, name)` | the edits of every file and the places that were not resolved; writes nothing |
+| `Symbols(name)` | the declarations with that name |
+| `Outline(file)` | the symbols of a file |
+
+- A position is an absolute path, a 1-based line and a 1-based column in bytes. Locations in answers use the same
+  units, with an exclusive end.
+- An operation a language does not implement fails with an error that `errors.Is(err, agentlsp.ErrNotSupported)`.
+- `Open` takes an optional func for diagnostic lines (skipped files, syntax errors, whether the index was built or
+  reused); they are not a contract.
+
+## PHP
+
+Package `php` indexes the `.php` files under the root. It answers `Definition` and `References` for methods;
+`Rename`, `Symbols` and `Outline` are not supported.
+
+- A method call is resolved when its receiver class is known from the code around it:
   - `(new Cart())->add()` and `(new Cart())?->add()`, anywhere, also at the top level of a file;
   - `$cart->add()` inside a function, method or closure body where every assignment to `$cart` in that body is
     `new Cart(...)` of one class, the first of them comes before the call and nothing can bind `$cart` to another
@@ -29,51 +68,51 @@ indexes the PHP files of the workspace into SQLite on disk and answers from that
     one argument.
   - `new self`, `new static`, `new parent`, an anonymous class and a dynamic class name give no receiver class.
   - These rules are recorded in [ADR 0001](docs/adr/0001-workspace-index-on-disk.md) (in Russian).
-- The answer lists the method declared in that class. A call becomes a reference only when that class declares the
-  method; a call that is not resolved this way is not a reference, whatever its method name.
-- `references` from a call site or from the method declaration lists every resolved call site of the method;
-  `context.includeDeclaration` adds the declaration.
+- `Definition` lists the method declared in that class. A call becomes a use only when that class declares the
+  method; a call that is not resolved this way is not a use, whatever its method name.
+- `References` from a call site or from the method declaration lists every resolved call site of the method in
+  `Uses`. `Implementations` and `Unresolved` are empty: there is no hierarchy, and calls whose receiver is unknown
+  are not collected.
 - Class and method names compare case-insensitively, as in PHP.
 
 Nothing else is resolved: no inheritance, interfaces, traits, `$this`, `self`, `static`, parameters, properties,
-return types or PHPDoc. Other requests are answered with `MethodNotFound`.
+return types or PHPDoc.
 
-## The index
+### The index
 
-- A request sent before the index is ready waits for it and gets the full answer. `$/cancelRequest` ends a waiting
-  request with `RequestCancelled`. If the index cannot be opened or built, requests fail with `RequestFailed`.
+- `Open` builds the index of the root or reuses it, and answers come from the files as they were at `Open`. It
+  compares the files under the root (path and content hash of every `.php` file) with the ones the index was built
+  from: if they are the same, the index is used as it is; otherwise it is built again as a whole.
+- The index is one SQLite file per root under the user's cache directory (`os.UserCacheDir()`) in `agent-lsp/php/`.
 - Symbolic links to files and directories are followed, also outside the root; a file is named by its path through
   the link, and a directory already on the path from the root is not walked again. Only regular files are read.
 - Skipped on purpose, and only these: an entry that is not a regular file (a named pipe, a socket, a device), a
-  directory already on the path from the root, and a broken symlink whose name does not end in `.php` (it is
-  logged to stderr). A symlink is broken only when its target is missing or its chain of links never ends. Any
-  other entry that cannot be read fails the index: a directory that cannot be listed, an entry that cannot be
-  stat-ed (also a symlink whose target path runs through a regular file or a directory without permission), a
-  `.php` file that cannot be opened or read, a broken `.php` symlink. Requests then
-  get `RequestFailed` with the path and the OS error, also when a ready index exists; once the cause is removed,
-  the next start answers in full.
-- phplslow chooses where the index lives: one SQLite file per workspace root under the user's cache directory
-  (`os.UserCacheDir()`, e.g. `$XDG_CACHE_HOME` or `~/.cache` on Linux) in `phplslow/`.
-- At start phplslow compares the files under the root (path and content hash of every `.php` file) with the ones the
-  index was built from. If they are the same, the index is used as it is; otherwise it is built again as a whole.
-- Answers come from the files as they were when the index was built; edits made while the server runs are not seen
-  until the next start.
+  directory already on the path from the root, and a broken symlink whose name does not end in `.php`. A symlink is
+  broken only when its target is missing or its chain of links never ends. Any other entry that cannot be read makes
+  `Open` fail with the path and the OS error, also when a ready index exists: a directory that cannot be listed, an
+  entry that cannot be stat-ed (also a symlink whose target path runs through a regular file or a directory without
+  permission), a `.php` file that cannot be opened or read, a broken `.php` symlink.
 
-## Build
+### The PHP parser
 
-Requires Go 1.26 or later. The build does not use CGO.
+PHP is parsed by a fork of `github.com/VKCOM/php-parser` that `go.mod` puts in place with `replace`. Go applies
+`replace` only in the main module, so a program that imports agent-lsp copies that `replace` line into its own
+`go.mod`; without it the program is built with the upstream parser, which loses a class named `Enum` and strings
+with the `b` prefix.
+
+## Development
+
+Requires Go 1.26 or later. The build does not use CGO; the library builds for Linux, macOS and Windows.
 
 ```bash
-make build   # bin/phplslow
+make go   # gofmt, go vet for linux, darwin and windows, go test
 ```
-
-Point your LSP client at `bin/phplslow` with no arguments and a `file://` `rootUri` (or a workspace folder) in
-`initialize`.
 
 ## Documentation
 
 - Decisions: [docs/adr/](docs/adr/) (in Russian).
 - Glossary: [CONTEXT.md](CONTEXT.md) (in Russian).
+- Changes: [CHANGELOG.md](CHANGELOG.md) (in Russian).
 
 ## Contributing
 

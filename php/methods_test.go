@@ -1,9 +1,11 @@
-package main_test
+package php_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	agentlsp "github.com/hakastein/agent-lsp"
 )
 
 var (
@@ -26,9 +28,9 @@ var (
 )
 
 func TestMethodDefinition(t *testing.T) {
+	cache(t)
 	root := workspace(t, "methods")
-	c := start(t, cache(t))
-	c.initialize(root)
+	ix, _ := open(t, root)
 
 	tests := []struct {
 		name string
@@ -51,45 +53,45 @@ func TestMethodDefinition(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.ElementsMatch(t, locations(t, root, tt.want), definition(c, root, tt.at))
+			assert.ElementsMatch(t, locations(t, root, tt.want), definition(t, ix, root, tt.at))
 		})
 	}
-	c.stop()
 }
 
 func TestMethodReferences(t *testing.T) {
+	cache(t)
 	root := workspace(t, "methods")
-	c := start(t, cache(t))
-	c.initialize(root)
+	ix, _ := open(t, root)
 
 	tests := []struct {
-		name        string
-		at          place
-		declaration bool
-		want        []place
+		name string
+		at   place
+		want []place
 	}{
-		{"from a call site", place{"src/app.php", "add('kiwi')"}, false, cartAddCalls},
-		{"from the declaration", cartAdd, false, cartAddCalls},
-		{"with the declaration", place{"src/Shop/Checkout.php", "add('apple')"}, true, append([]place{cartAdd}, cartAddCalls...)},
-		{"same method name of another class", wishAdd, false, []place{{"src/Shop/Checkout.php", "add('plum')"}}},
-		{"method with one call", place{"src/Shop/Cart.php", "total(): int"}, false, []place{{"src/Shop/Checkout.php", "total();"}}},
-		{"unresolved call", place{"src/Shop/Checkout.php", "add('fig')"}, false, nil},
+		{"from a call site", place{"src/app.php", "add('kiwi')"}, cartAddCalls},
+		{"from the declaration", cartAdd, cartAddCalls},
+		{"same method name of another class", wishAdd, []place{{"src/Shop/Checkout.php", "add('plum')"}}},
+		{"method with one call", place{"src/Shop/Cart.php", "total(): int"}, []place{{"src/Shop/Checkout.php", "total();"}}},
+		{"unresolved call", place{"src/Shop/Checkout.php", "add('fig')"}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.ElementsMatch(t, locations(t, root, tt.want), references(c, root, tt.at, tt.declaration))
+			assert.ElementsMatch(t, locations(t, root, tt.want), uses(t, ix, root, tt.at))
 		})
 	}
-	c.stop()
 }
 
-func TestRootWithASpaceAndAPercentSign(t *testing.T) {
-	root := workspaceAt(t, "methods", "my ws 100%")
-	c := start(t, cache(t))
-	c.initialize(root)
+// catnip tells an operation PHP does not answer yet from a failed one by agentlsp.ErrNotSupported.
+func TestOperationsWithoutAnAnswerAreNotSupported(t *testing.T) {
+	cache(t)
+	root := workspace(t, "methods")
+	ix, _ := open(t, root)
+	at := cartAdd.position(t, root)
+	_, rename := ix.Rename(at, "put")
+	_, symbols := ix.Symbols("add")
+	_, outline := ix.Outline(at.File)
 
-	call := place{"src/app.php", "add('kiwi')"}
-	assert.ElementsMatch(t, locations(t, root, []place{cartAdd}), definition(c, root, call))
-	assert.ElementsMatch(t, locations(t, root, cartAddCalls), references(c, root, call, false))
-	c.stop()
+	assert.ErrorIs(t, rename, agentlsp.ErrNotSupported)
+	assert.ErrorIs(t, symbols, agentlsp.ErrNotSupported)
+	assert.ErrorIs(t, outline, agentlsp.ErrNotSupported)
 }

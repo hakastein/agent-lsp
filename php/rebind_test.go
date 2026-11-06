@@ -1,4 +1,4 @@
-package main_test
+package php_test
 
 import (
 	"testing"
@@ -17,9 +17,9 @@ var (
 // A variable holds `new X` only when nothing in the program can bind it to another value: a call on it that
 // something else may rebind has no definition.
 func TestRebindableVariableIsUnknown(t *testing.T) {
+	cache(t)
 	root := workspace(t, "rebind")
-	c := start(t, cache(t))
-	c.initialize(root)
+	ix, _ := open(t, root)
 
 	tests := []struct {
 		name string
@@ -53,11 +53,10 @@ func TestRebindableVariableIsUnknown(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.ElementsMatch(t, locations(t, root, tt.want), definition(c, root, tt.at))
+			assert.ElementsMatch(t, locations(t, root, tt.want), definition(t, ix, root, tt.at))
 		})
 	}
 	t.Run("references", func(t *testing.T) {
-		assert.ElementsMatch(t, locations(t, root, rebindResolving), references(c, root, rebindCartAdd, false))
+		assert.ElementsMatch(t, locations(t, root, rebindResolving), uses(t, ix, root, rebindCartAdd))
 	})
-	c.stop()
 }

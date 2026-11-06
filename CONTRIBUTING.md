@@ -1,37 +1,36 @@
 # Contributing
 
-Bug reports and pull requests are welcome on [GitHub](https://github.com/hakastein/phplslow).
+Bug reports and pull requests are welcome on [GitHub](https://github.com/hakastein/agent-lsp).
 
 ## Before you start
 
-- phplslow is a standalone LSP server. It follows the LSP specification and its own contract; behaviour is not
-  shaped for a particular client.
+- agent-lsp is a library with its own contract; behaviour is not shaped for a particular program that uses it.
 - Open an issue before a change of behaviour. A change of a recorded decision updates its ADR in the same pull
   request.
 - Design records ([`docs/adr/`](docs/adr/)) and the glossary ([`CONTEXT.md`](CONTEXT.md)) are in Russian.
-- A bug found on a private code base comes as a small self-written PHP fixture, never as that code.
+- A bug found on a private code base comes as a small self-written fixture, never as that code.
 
 ## Development
 
 ```bash
-make go      # gofmt check, go vet, go test
-make build   # bin/phplslow
+make go   # gofmt check, go vet for linux, darwin and windows, go test
 ```
 
-Everything builds with `CGO_ENABLED=0`. CI runs the same targets on every push and pull request.
+Everything builds with `CGO_ENABLED=0`. CI runs the same target on every push and pull request.
 
 ## Tests
 
-- The seam is the phplslow process: `TestMain` builds the binary, a test starts it, speaks LSP to it over stdio and
-  checks the answers. Tests do not read the SQLite tables of the index.
+- The seam is the exported API: a test opens the index of a root with the language package's `Open`, asks a
+  question and checks the places in the answer or the error. Tests do not read the SQLite tables of the index.
 - Every test gets its own cache directory, so indexes of tests never meet.
-- Fixtures are small PHP files in `testdata/`; a test finds a place in a file by a unique substring.
-- Tests live in the external package `main_test` and use testify with table cases; a test body has no logic.
-- Lines phplslow writes to stderr are diagnostics, not a protocol. A test reads them only where nothing else shows
-  the behaviour.
+- Fixtures are small files in the language package's `testdata/`; a test finds a place in a file by a unique
+  substring.
+- Tests live in the external package (`php_test`) and use testify with table cases; a test body has no logic.
+- Diagnostic lines of `Open` are not a contract. A test reads them only where nothing else shows the behaviour.
 
 ## Pull requests
 
-- One change per pull request, against `main`.
-- Code borrowed under MIT keeps its authors' notice.
+- One change per pull request, against `main`, from a branch `issue-<N>`.
+- Borrowed code keeps its authors' notice.
 - `make go` passes.
+- A release is a tag `vX.Y.Z` with a section `## vX.Y.Z` in `CHANGELOG.md`.

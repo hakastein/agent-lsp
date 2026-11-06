@@ -1,4 +1,4 @@
-package main_test
+package php_test
 
 import (
 	"testing"
@@ -24,9 +24,9 @@ var knownScopeCalls = []place{
 // A variable's class is known only inside a function, method or closure body, from the writes in that body: any
 // file may reach a top-level variable, and any function a superglobal.
 func TestReceiverScopes(t *testing.T) {
+	cache(t)
 	root := workspace(t, "scopes")
-	c := start(t, cache(t))
-	c.initialize(root)
+	ix, _ := open(t, root)
 
 	tests := []struct {
 		name string
@@ -65,11 +65,10 @@ func TestReceiverScopes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.ElementsMatch(t, locations(t, root, tt.want), definition(c, root, tt.at))
+			assert.ElementsMatch(t, locations(t, root, tt.want), definition(t, ix, root, tt.at))
 		})
 	}
 	t.Run("references from the declaration", func(t *testing.T) {
-		assert.ElementsMatch(t, locations(t, root, knownScopeCalls), references(c, root, cartAdd, false))
+		assert.ElementsMatch(t, locations(t, root, knownScopeCalls), uses(t, ix, root, cartAdd))
 	})
-	c.stop()
 }
