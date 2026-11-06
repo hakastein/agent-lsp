@@ -1,20 +1,24 @@
 package php_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	agentlsp "github.com/hakastein/agent-lsp"
 )
 
 // A position that is not a place in a file of the root is an error that repeats it; a place where no Symbol is, is
-// an empty answer. src/app.php has 27 lines and a newline after the last; line 8, `    $basket->add('kiwi');`, has
-// 25 bytes.
+// an empty answer. src/app.php ends in a newline, so its lines are 1 to 28 and line 28 is empty; line 8,
+// `    $basket->add('kiwi');`, has 25 bytes. In crlf.php line 2, `echo 1;`, has 7 bytes: \r\n ends it.
 func TestPositionThatIsNotAPlaceIsAnError(t *testing.T) {
 	cache(t)
 	root := newRoot(t, "methods")
+	crlf := filepath.Join(root, "src", "crlf.php")
+	require.NoError(t, os.WriteFile(crlf, []byte("<?php\r\necho 1;\r\n"), 0o644))
 	ix, _ := open(t, root)
 	app := filepath.Join(root, "src", "app.php")
 
@@ -34,6 +38,8 @@ func TestPositionThatIsNotAPlaceIsAnError(t *testing.T) {
 		{"comment", agentlsp.Position{File: app, Line: 11, Column: 6}, ""},
 		{"end of the line", agentlsp.Position{File: app, Line: 8, Column: 26}, ""},
 		{"empty line after the last newline", agentlsp.Position{File: app, Line: 28, Column: 1}, ""},
+		{"end of a line ending in CRLF", agentlsp.Position{File: crlf, Line: 2, Column: 8}, ""},
+		{"CR of a line ending in CRLF", agentlsp.Position{File: crlf, Line: 2, Column: 9}, "no column 9: line 2 has columns 1 to 8"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
