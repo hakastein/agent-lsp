@@ -96,7 +96,10 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
   the read is a miss; when a later load of packages does, that question fails. Either way `Close` removes the file,
   and the next call makes it again. A file that another process has already made again is not removed, and a
   read or a write that failed on the old file is not an error: `Open` opens again, `Close` drops what was not
-  written. Any other error of opening the file fails `Open`.
+  written. A damaged file that cannot be removed, as on Windows while another process holds it open, fails no call
+  either: when `Open` finds the damage, the call goes on with a cache in memory and computes its answer again; when
+  `Close` does, it leaves the file. The next call removes the file, or goes on in memory while it still cannot. Any
+  other error of opening the file fails `Open`.
 - Processes open, make and remove the cache file one at a time, under the lock of `agent-lsp/cache.sqlite.lock` next
   to it: calls that start at once on a missing or damaged file all succeed.
 - The diagnostic lines say whether the packages were loaded or reused and how many cache entries were reused,

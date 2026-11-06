@@ -46,9 +46,8 @@ func cache(t *testing.T) {
 	}
 }
 
-// damage overwrites the cache database from its third page (of SQLite's default 4096 bytes) on, past the schema and
-// the bookkeeping of the cache, with bytes that are no page of SQLite.
-func damage(t *testing.T) {
+// damage overwrites the bytes of the cache database that at gives for its size with bytes that are no page of SQLite.
+func damage(t *testing.T, at func(size int64) (from, to int64)) {
 	t.Helper()
 	file, err := cachedb.Path()
 	require.NoError(t, err)
@@ -56,7 +55,8 @@ func damage(t *testing.T) {
 	require.NoError(t, err)
 	info, err := f.Stat()
 	require.NoError(t, err)
-	_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, int(info.Size())-2*4096), 2*4096)
+	from, to := at(info.Size())
+	_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, int(to-from)), from)
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 }

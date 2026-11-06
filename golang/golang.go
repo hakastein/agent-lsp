@@ -133,8 +133,9 @@ func openIndex(root string, logf func(string, ...any)) (_ *Index, err error) {
 }
 
 // Close writes what the gopls cache computed to the cache database and closes it. A cache database found damaged
-// is removed instead, and the next Open makes it again. Nor is it an error that what was computed misses a cache
-// database another process has made again meanwhile. A second Close does nothing.
+// is removed instead, and the next Open makes it again; one that cannot be removed now, the next Open removes. Nor
+// is it an error that what was computed misses a cache database another process has made again meanwhile. A second
+// Close does nothing.
 func (ix *Index) Close() error {
 	if ix.session == nil {
 		return nil
@@ -146,7 +147,9 @@ func (ix *Index) Close() error {
 	hits, misses := filecache.Stats()
 	written, err := filecache.Flush()
 	ix.logf("go: cache: %d reused, %d missed, %d written", hits, misses, written)
-	err = errors.Join(err, ix.loader.damaged)
+	if !cachedb.Damaged(err) {
+		err = errors.Join(err, ix.loader.damaged) // one damage is enough: CloseAfter removes the database
+	}
 	if cachedb.Damaged(err) {
 		ix.logf("go: cache database damaged: %v", err)
 	}

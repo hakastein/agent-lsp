@@ -44,8 +44,9 @@ type DB struct {
 
 // Open opens the cache database, runs schema (statements that must be idempotent, such as CREATE TABLE IF NOT
 // EXISTS) and sweeps the tables when the last sweep is older than a day. A file that is not a database or is
-// damaged is made again: what the cache holds can be computed again. Processes open the database one at a time,
-// under the lock of the file <Path()>.lock.
+// damaged is made again: what the cache holds can be computed again. A damaged file that cannot be removed, as on
+// Windows while another process holds it open, leaves this Open a database in memory, and the next Open removes it.
+// Processes open the database one at a time, under the lock of the file <Path()>.lock.
 func Open(schema string) (*DB, error) {
 	file, err := Path()
 	if err != nil {
@@ -59,12 +60,16 @@ func Open(schema string) (*DB, error) {
 		return nil, err
 	}
 	defer lock.Close()
-	db, err := open(file, schema)
-	if Damaged(err) {
-		if gen, err = remove(lock, file); err != nil {
-			return nil, err
-		}
+	var db *sql.DB
+	if !bytes.Equal(gen, unremoved) {
 		db, err = open(file, schema)
+	}
+	if bytes.Equal(gen, unremoved) || Damaged(err) {
+		if gen, err = remove(lock, file); err == nil {
+			db, err = open(file, schema)
+		} else {
+			db, err = open("", schema)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
@@ -75,7 +80,7 @@ func Open(schema string) (*DB, error) {
 // CloseAfter closes db after err and returns what is left of err with the error of closing. An err that says the
 // database is damaged removes the database file, so that the next Open makes a new one; an err after the file was
 // made again since db was opened is of a file that no Open opens again. Both are dropped, and the damaged file is
-// removed only when it was not made again.
+// removed only when it was not made again; a file that cannot be removed is left to the next Open.
 func (db *DB) CloseAfter(err error) error {
 	closeErr := db.Close()
 	if err == nil {
@@ -90,7 +95,8 @@ func (db *DB) CloseAfter(err error) error {
 		return closeErr
 	}
 	if Damaged(err) {
-		_, err = remove(lock, db.file)
+		remove(lock, db.file)
+		return closeErr
 	}
 	return errors.Join(err, closeErr)
 }
@@ -120,25 +126,42 @@ func lockDB(file string) (*os.File, []byte, error) {
 	return lock, gen, nil
 }
 
-// remove removes the database file under the lock and writes a new content of the lock file, which it returns.
+// unremoved is the content of the lock file while the database file is damaged and could not be removed: the next
+// Open removes it.
+var unremoved = []byte("unremoved")
+
+// remove removes the database file under the lock and writes a new content of the lock file, which it returns. A
+// file it cannot remove, it marks unremoved and returns the error.
 func remove(lock *os.File, file string) ([]byte, error) {
+	gen, err := fmt.Appendf(nil, "%016x", time.Now().UnixNano()), error(nil)
 	for _, f := range []string{file, file + "-wal", file + "-shm"} {
-		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, err
+		if e := os.Remove(f); e != nil && !errors.Is(e, fs.ErrNotExist) {
+			gen, err = unremoved, e
+			break
 		}
 	}
-	gen := fmt.Appendf(nil, "%016x", time.Now().UnixNano())
-	_, err := lock.WriteAt(gen, 0)
-	return gen, err
+	if e := lock.Truncate(0); e != nil {
+		return gen, errors.Join(err, e)
+	}
+	_, e := lock.WriteAt(gen, 0)
+	return gen, errors.Join(err, e)
 }
 
+// open opens the database file, or a database in memory for no file.
 func open(file, schema string) (*sql.DB, error) {
-	// A URI with an escaped path: a ? or % in the path is a part of the name, not the start of the query.
-	uri := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(file), "/")}
-	db, err := sql.Open("sqlite", uri.String()+
+	name := ":memory:"
+	if file != "" {
+		// A URI with an escaped path: a ? or % in the path is a part of the name, not the start of the query.
+		uri := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(file), "/")}
+		name = uri.String()
+	}
+	db, err := sql.Open("sqlite", name+
 		"?_pragma=busy_timeout(60000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_txlock=immediate")
 	if err != nil {
 		return nil, err
+	}
+	if file == "" {
+		db.SetMaxOpenConns(1) // every connection to :memory: is a database of its own
 	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;` +
 		schema); err != nil {
