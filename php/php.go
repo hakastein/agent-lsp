@@ -4,6 +4,7 @@
 package php
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -143,7 +145,9 @@ func Open(root string, logf func(format string, args ...any)) (*Index, error) {
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", file+"?_pragma=busy_timeout(60000)&_txlock=immediate")
+	// A URI with an escaped path: a ? or % in the path is a part of the name, not the start of the query.
+	uri := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(file), "/")}
+	db, err := sql.Open("sqlite", uri.String()+"?_pragma=busy_timeout(60000)&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +434,10 @@ func insert(stmt *sql.Stmt, key string, file int64, r facts.Range) error {
 }
 
 // Definition is the declarations of the Symbol at pos: the one a link there points to, or the one declared there.
-// A position outside the root or on no Symbol has none.
+// A place in a file of the root where no Symbol is has none. A position that is not such a place is an error that
+// repeats pos and names the problem: a relative path, a file outside the root or one that does not exist, a line
+// or a column outside the file. The file is read as it is on disk; a column may stand right after the last byte
+// of its line.
 func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Location, error) {
 	key, err := ix.symbolAt(pos)
 	if err != nil || key == "" {
@@ -441,7 +448,8 @@ func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Location, error) 
 }
 
 // References is every link to the Symbol at pos, in Uses. There is no hierarchy, so Implementations is empty, and
-// calls whose receiver class is unknown are not collected, so Unresolved is empty too.
+// calls whose receiver class is unknown are not collected, so Unresolved is empty too. Its answer to a place where
+// no Symbol is and its errors on a position are those of Definition.
 func (ix *Index) References(pos agentlsp.Position) (agentlsp.References, error) {
 	key, err := ix.symbolAt(pos)
 	if err != nil || key == "" {
@@ -469,9 +477,9 @@ func (ix *Index) Outline(file string) ([]agentlsp.Symbol, error) {
 
 // symbolAt is the key of the Symbol a link at pos points to or that is declared at pos; "" when there is none.
 func (ix *Index) symbolAt(pos agentlsp.Position) (string, error) {
-	rel, err := filepath.Rel(ix.root, pos.File)
-	if err != nil || !filepath.IsLocal(rel) {
-		return "", nil
+	rel, err := ix.place(pos)
+	if err != nil {
+		return "", fmt.Errorf("php: position %s:%d:%d: %w", pos.File, pos.Line, pos.Column, err)
 	}
 	for _, q := range []string{
 		`SELECT l.key FROM links l JOIN files f ON f.id = l.file
@@ -480,13 +488,41 @@ func (ix *Index) symbolAt(pos agentlsp.Position) (string, error) {
 			WHERE f.path = ?1 AND (s.sl, s.sc) <= (?2, ?3) AND (?2, ?3) <= (s.el, s.ec) LIMIT 1`,
 	} {
 		var key string
-		err := ix.db.QueryRow(q, filepath.ToSlash(rel), pos.Line, pos.Column).Scan(&key)
+		err := ix.db.QueryRow(q, rel, pos.Line, pos.Column).Scan(&key)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		return key, err
 	}
 	return "", nil
+}
+
+// place is the path of the file of pos relative to the root, with forward slashes, or what makes pos no place in a
+// file of the root. The line break of a line, \n or \r\n, is not a column of it.
+func (ix *Index) place(pos agentlsp.Position) (string, error) {
+	if !filepath.IsAbs(pos.File) {
+		return "", errors.New("the path is not absolute")
+	}
+	rel, err := filepath.Rel(ix.root, pos.File)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", errors.New("the file is not under the root")
+	}
+	src, err := readFile(pos.File)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", errors.New("the file does not exist")
+	}
+	if err != nil {
+		return "", err
+	}
+	lines := bytes.Split(src, []byte("\n"))
+	if pos.Line < 1 || pos.Line > len(lines) {
+		return "", fmt.Errorf("no line %d: the file has lines 1 to %d", pos.Line, len(lines))
+	}
+	end := len(bytes.TrimSuffix(lines[pos.Line-1], []byte("\r"))) + 1
+	if pos.Column < 1 || pos.Column > end {
+		return "", fmt.Errorf("no column %d: line %d has columns 1 to %d", pos.Column, pos.Line, end)
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 func (ix *Index) locations(q, key string) ([]agentlsp.Location, error) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,12 +14,23 @@ import (
 	"github.com/hakastein/agent-lsp/php"
 )
 
-// workspace copies testdata/<name> into a fresh directory and returns its root.
-func workspace(t *testing.T, name string) string {
+// newRoot copies testdata/<name> into a fresh directory and returns it as the root.
+func newRoot(t *testing.T, name string) string {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "ws")
+	root := filepath.Join(t.TempDir(), "root")
 	require.NoError(t, os.CopyFS(root, os.DirFS(filepath.Join("testdata", name))))
 	return root
+}
+
+// symlink makes link point at target. Where the OS does not let the user make symlinks, as on Windows without the
+// privilege, the test is skipped.
+func symlink(t *testing.T, target, link string) {
+	t.Helper()
+	err := os.Symlink(target, link)
+	if err != nil && runtime.GOOS == "windows" {
+		t.Skipf("no symlinks on this system: %v", err)
+	}
+	require.NoError(t, err)
 }
 
 // cache gives the rest of the test a fresh user cache directory, so indexes of tests never meet and never touch the
@@ -115,4 +127,14 @@ func uses(t *testing.T, ix *php.Index, root string, at place) []agentlsp.Locatio
 	require.Empty(t, refs.Implementations)
 	require.Empty(t, refs.Unresolved)
 	return refs.Uses
+}
+
+// problem is what err says is wrong with the position at: its text after "php: position <at>: ", all of it when it
+// does not start so, and "" for no error.
+func problem(at agentlsp.Position, err error) string {
+	if err == nil {
+		return ""
+	}
+	text, _ := strings.CutPrefix(err.Error(), fmt.Sprintf("php: position %s:%d:%d: ", at.File, at.Line, at.Column))
+	return text
 }

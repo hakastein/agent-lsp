@@ -27,7 +27,7 @@ type Method struct {
 }
 
 // Call is a method call whose receiver class is known: `(new X)->m()`, or `$x->m()` in a function, method or
-// closure body where nothing can bind `$x` to anything but `new X`. It becomes a Reference only when X declares m.
+// closure body where nothing can bind `$x` to anything but `new X`. It becomes a use only when X declares m.
 type Call struct {
 	Key  string // MethodKey of the receiver class and the called name
 	Name Range  // the method name at the call site
@@ -566,7 +566,7 @@ func (s *scope) spoil(name string) {
 }
 
 // classOf is the class of variable name at byte offset at; "" when the class is not known. A variable of the
-// top level is never known: `include`, `global` and `$GLOBALS` in any file, also one the Workspace does not index,
+// top level is never known: `include`, `global` and `$GLOBALS` in any file, also one the index does not hold,
 // may write it.
 func (s *scope) classOf(name string, at int) string {
 	if s.top || s.dynamic {

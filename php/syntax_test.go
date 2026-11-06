@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// The syntax Workspace holds valid PHP that the parser must not lose: a class named Enum and its subclass, strings
+// The syntax root holds valid PHP that the parser must not lose: a class named Enum and its subclass, strings
 // with the b prefix, and a real enum next to them.
 var (
 	enumLabel  = place{"src/Shop/Enum.php", "label(string $lang)"}
@@ -25,7 +25,7 @@ var (
 
 func TestSyntaxDefinition(t *testing.T) {
 	cache(t)
-	root := workspace(t, "syntax")
+	root := newRoot(t, "syntax")
 	ix, _ := open(t, root)
 
 	tests := []struct {
@@ -49,7 +49,7 @@ func TestSyntaxDefinition(t *testing.T) {
 
 func TestSyntaxReferences(t *testing.T) {
 	cache(t)
-	root := workspace(t, "syntax")
+	root := newRoot(t, "syntax")
 	ix, _ := open(t, root)
 
 	tests := []struct {

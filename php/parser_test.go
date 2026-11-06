@@ -77,7 +77,7 @@ func TestIndexOfAnotherParserIsNotReused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cache(t)
-			root := workspace(t, "syntax")
+			root := newRoot(t, "syntax")
 			tt.first(t, root, enumLabel)
 			got, log := tt.second(t, root, enumLabel)
 

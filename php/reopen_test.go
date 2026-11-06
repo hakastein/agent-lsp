@@ -1,8 +1,11 @@
 package php_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,7 +14,7 @@ import (
 
 func TestReopenReusesTheIndex(t *testing.T) {
 	cache(t)
-	root := workspace(t, "methods")
+	root := newRoot(t, "methods")
 	call := place{"src/Shop/Checkout.php", "add('apple')"}
 
 	first, firstLog := open(t, root)
@@ -40,7 +43,7 @@ func TestReopenAfterAChangeAnswersFromTheDisk(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cache(t)
-			root := workspace(t, "methods")
+			root := newRoot(t, "methods")
 			first, _ := open(t, root)
 			uses(t, first, root, cartAdd)
 
@@ -59,9 +62,29 @@ func TestOpenFailsWithoutACacheDirectory(t *testing.T) {
 	require.NoError(t, os.WriteFile(home, nil, 0o600))
 	cacheAt(t, home)
 
-	_, _, err := tryOpen(t, workspace(t, "methods"))
+	_, _, err := tryOpen(t, newRoot(t, "methods"))
 
-	assert.Error(t, err)
+	assert.Equal(t, &fs.PathError{Op: "mkdir", Path: home, Err: syscall.ENOTDIR}, err)
+}
+
+// The path of the index file goes into the SQLite DSN: a space, % and ? in the cache directory and the root are
+// parts of the name. Were ? read as the start of the query, every root would get the one file before it, and the
+// index of root would be built again after other. Windows does not allow ? in a name.
+func TestOpenUnderPathsWithSpecialCharacters(t *testing.T) {
+	name := "a %41 ?b"
+	if runtime.GOOS == "windows" {
+		name = "a %41 b"
+	}
+	cacheAt(t, filepath.Join(t.TempDir(), name))
+	root, other := filepath.Join(t.TempDir(), name), filepath.Join(t.TempDir(), name)
+	require.NoError(t, os.CopyFS(root, os.DirFS(filepath.Join("testdata", "methods"))))
+	require.NoError(t, os.CopyFS(other, os.DirFS(filepath.Join("testdata", "syntax"))))
+	open(t, root)
+	open(t, other)
+	ix, log := open(t, root)
+
+	assert.ElementsMatch(t, locations(t, root, cartAddCalls), uses(t, ix, root, cartAdd))
+	assert.Contains(t, log, reused)
 }
 
 func appendToApp(t *testing.T, root string) {

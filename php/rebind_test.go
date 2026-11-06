@@ -18,7 +18,7 @@ var (
 // something else may rebind has no definition.
 func TestRebindableVariableIsUnknown(t *testing.T) {
 	cache(t)
-	root := workspace(t, "rebind")
+	root := newRoot(t, "rebind")
 	ix, _ := open(t, root)
 
 	tests := []struct {
@@ -56,7 +56,7 @@ func TestRebindableVariableIsUnknown(t *testing.T) {
 			assert.ElementsMatch(t, locations(t, root, tt.want), definition(t, ix, root, tt.at))
 		})
 	}
-	t.Run("references", func(t *testing.T) {
+	t.Run("uses", func(t *testing.T) {
 		assert.ElementsMatch(t, locations(t, root, rebindResolving), uses(t, ix, root, rebindCartAdd))
 	})
 }

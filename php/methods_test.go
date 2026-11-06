@@ -29,7 +29,7 @@ var (
 
 func TestMethodDefinition(t *testing.T) {
 	cache(t)
-	root := workspace(t, "methods")
+	root := newRoot(t, "methods")
 	ix, _ := open(t, root)
 
 	tests := []struct {
@@ -60,7 +60,7 @@ func TestMethodDefinition(t *testing.T) {
 
 func TestMethodReferences(t *testing.T) {
 	cache(t)
-	root := workspace(t, "methods")
+	root := newRoot(t, "methods")
 	ix, _ := open(t, root)
 
 	tests := []struct {
@@ -81,10 +81,10 @@ func TestMethodReferences(t *testing.T) {
 	}
 }
 
-// catnip tells an operation PHP does not answer yet from a failed one by agentlsp.ErrNotSupported.
+// A caller tells an operation PHP does not answer yet from a failed one by agentlsp.ErrNotSupported.
 func TestOperationsWithoutAnAnswerAreNotSupported(t *testing.T) {
 	cache(t)
-	root := workspace(t, "methods")
+	root := newRoot(t, "methods")
 	ix, _ := open(t, root)
 	at := cartAdd.position(t, root)
 	_, rename := ix.Rename(at, "put")

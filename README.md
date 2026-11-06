@@ -39,6 +39,11 @@ refs, err := ix.References(pos) // refs.Uses, refs.Implementations, refs.Unresol
 
 - A position is an absolute path, a 1-based line and a 1-based column in bytes. Locations in answers use the same
   units, with an exclusive end.
+- A position that is not a place in a file of the root (a relative path, a file outside the root or one that does
+  not exist, a line or a column outside the file) is an error that repeats the position and names the problem. A
+  place in a file of the root where no symbol is, such as whitespace or a comment, gives an empty answer and no
+  error. The file is read as it is on disk; a column may stand right after the last byte of its line, and the line
+  break (`\n` or `\r\n`) is not a column.
 - An operation a language does not implement fails with an error that `errors.Is(err, agentlsp.ErrNotSupported)`.
 - `Open` takes an optional func for diagnostic lines (skipped files, syntax errors, whether the index was built or
   reused); they are not a contract.

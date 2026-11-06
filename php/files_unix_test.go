@@ -15,7 +15,7 @@ import (
 // A named pipe and a symlink to one have .php names; reading either would wait for a writer forever.
 func TestNonRegularFilesAreNotIndexed(t *testing.T) {
 	cache(t)
-	root, outside := workspace(t, "methods"), t.TempDir()
+	root, outside := newRoot(t, "methods"), t.TempDir()
 	require.NoError(t, syscall.Mkfifo(filepath.Join(root, "src", "x.php"), 0o600))
 	require.NoError(t, syscall.Mkfifo(filepath.Join(outside, "pipe.php"), 0o600))
 	require.NoError(t, os.Symlink(filepath.Join(outside, "pipe.php"), filepath.Join(root, "src", "y.php")))
@@ -56,7 +56,7 @@ func TestUnreadableEntryFailsTheIndex(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			skipAsRoot(t, tt.permissions)
 			cache(t)
-			root := workspace(t, "methods")
+			root := newRoot(t, "methods")
 			spoil, mend := tt.arrange(t, root)
 			want := locations(t, root, append([]place{tt.call}, cartAddCalls...))
 			spoil()
@@ -80,7 +80,7 @@ func TestUnreadableEntryFailsAReadyIndex(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			skipAsRoot(t, tt.permissions)
 			cache(t)
-			root := workspace(t, "methods")
+			root := newRoot(t, "methods")
 			first, _ := open(t, root)
 			before := uses(t, first, root, cartAdd)
 			spoil, mend := tt.arrange(t, root)

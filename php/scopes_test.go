@@ -25,7 +25,7 @@ var knownScopeCalls = []place{
 // file may reach a top-level variable, and any function a superglobal.
 func TestReceiverScopes(t *testing.T) {
 	cache(t)
-	root := workspace(t, "scopes")
+	root := newRoot(t, "scopes")
 	ix, _ := open(t, root)
 
 	tests := []struct {
@@ -68,7 +68,7 @@ func TestReceiverScopes(t *testing.T) {
 			assert.ElementsMatch(t, locations(t, root, tt.want), definition(t, ix, root, tt.at))
 		})
 	}
-	t.Run("references from the declaration", func(t *testing.T) {
+	t.Run("uses from the declaration", func(t *testing.T) {
 		assert.ElementsMatch(t, locations(t, root, knownScopeCalls), uses(t, ix, root, cartAdd))
 	})
 }

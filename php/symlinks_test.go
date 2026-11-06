@@ -14,12 +14,12 @@ const linkedCall = "<?php\n\nfunction linked(): void\n{\n" +
 
 func TestSymlinksAreFollowed(t *testing.T) {
 	cache(t)
-	root, outside := workspace(t, "methods"), t.TempDir()
+	root, outside := newRoot(t, "methods"), t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(outside, "linked.php"), []byte(linkedCall), 0o600))
 	require.NoError(t, os.Mkdir(filepath.Join(outside, "lib"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(outside, "lib", "deep.php"), []byte(linkedCall), 0o600))
-	require.NoError(t, os.Symlink(filepath.Join(outside, "linked.php"), filepath.Join(root, "src", "file.php")))
-	require.NoError(t, os.Symlink(filepath.Join(outside, "lib"), filepath.Join(root, "src", "lib")))
+	symlink(t, filepath.Join(outside, "linked.php"), filepath.Join(root, "src", "file.php"))
+	symlink(t, filepath.Join(outside, "lib"), filepath.Join(root, "src", "lib"))
 	ix, _ := open(t, root)
 
 	want := append([]place{{"src/file.php", "add('linked')"}, {"src/lib/deep.php", "add('linked')"}}, cartAddCalls...)
@@ -29,8 +29,8 @@ func TestSymlinksAreFollowed(t *testing.T) {
 // src/loop/ is the root again; walking into it would never end.
 func TestSymlinkCycleIsWalkedOnce(t *testing.T) {
 	cache(t)
-	root := workspace(t, "methods")
-	require.NoError(t, os.Symlink(root, filepath.Join(root, "src", "loop")))
+	root := newRoot(t, "methods")
+	symlink(t, root, filepath.Join(root, "src", "loop"))
 	ix, _ := open(t, root)
 
 	assert.ElementsMatch(t, locations(t, root, cartAddCalls), uses(t, ix, root, cartAdd))
@@ -49,9 +49,9 @@ func TestBrokenSymlinkWithAnotherNameIsSkipped(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cache(t)
-			root := workspace(t, "methods")
+			root := newRoot(t, "methods")
 			link := filepath.Join(root, "src", "gone")
-			require.NoError(t, os.Symlink(tt.target(t, link), link))
+			symlink(t, tt.target(t, link), link)
 			ix, log := open(t, root)
 
 			assert.ElementsMatch(t, locations(t, root, cartAddCalls), uses(t, ix, root, cartAdd))
