@@ -1,5 +1,5 @@
 // Package agentlsp holds what the language packages of agent-lsp share: positions, locations, the answers of the
-// operations and the error of an operation a language does not support. Each language is a package of its own
+// operations, the kinds of symbols and the error of an operation a language does not support. Each language is a package of its own
 // (php, golang) with an Open function that returns an index of a root; the indexes of all languages have the same methods,
 // so a consumer declares one interface for them and picks the package by the file extension.
 package agentlsp
@@ -77,11 +77,29 @@ type Declaration struct {
 	Origin    Origin
 }
 
+// Kind is the kind of a symbol; its value is the word a consumer prints. The kinds are shared by the languages.
+type Kind string
+
+const (
+	// KindFunc is a function.
+	KindFunc Kind = "func"
+	// KindMethod is a method of a type, also of an interface type.
+	KindMethod Kind = "method"
+	// KindType is a type.
+	KindType Kind = "type"
+	// KindField is a field of a struct type, also an embedded one.
+	KindField Kind = "field"
+	// KindVar is a variable at the top level.
+	KindVar Kind = "var"
+	// KindConst is a constant at the top level.
+	KindConst Kind = "const"
+)
+
 // Symbol is a named declaration: its name, its kind and the declaration that contains it (Container: the type of a
-// method or a field, "" at the top level). The kinds of a language are named by its package.
+// method or a field, "" at the top level).
 type Symbol struct {
 	Name      string
-	Kind      string
+	Kind      Kind
 	Container string
 	Declaration
 }

@@ -26,7 +26,8 @@ Everything builds with `CGO_ENABLED=0`. CI runs the same target on every push an
 - Every test gets its own cache directory, so indexes of tests never meet.
 - Fixtures are small files in the language package's `testdata/`; a test finds a place in a file by a unique
   substring.
-- Tests live in the external package (`php_test`) and use testify with table cases; a test body has no logic.
+- Tests live in the external packages (`php_test`, `golang_test`) and use testify with table cases; a test body
+  has no logic.
 - Diagnostic lines of `Open` are not a contract. A test reads them only where nothing else shows the behaviour.
 
 ## Pull requests

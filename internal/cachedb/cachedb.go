@@ -1,5 +1,5 @@
-// Package cachedb opens the cache database of the user: one SQLite file under the user's cache directory that every
-// language package of agent-lsp keeps its tables in. A table whose rows carry a "used" column (unix seconds of the
+// Package cachedb opens the cache database of the user: one SQLite file under the user's cache directory that the
+// golang package keeps its tables in (the php package keeps its index in a file of its own per root). A table whose rows carry a "used" column (unix seconds of the
 // last use) is swept: rows not used for MaxAge are deleted along the way, at most once a day.
 package cachedb
 
@@ -7,13 +7,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // MaxAge is how long a row of the cache lives without being used.
@@ -32,7 +34,8 @@ func Path() (string, error) {
 }
 
 // Open opens the cache database, runs schema (statements that must be idempotent, such as CREATE TABLE IF NOT
-// EXISTS) and sweeps the tables when the last sweep is older than a day.
+// EXISTS) and sweeps the tables when the last sweep is older than a day. A file that is not a database or is
+// damaged is made again: what the cache holds can be computed again.
 func Open(schema string) (*sql.DB, error) {
 	file, err := Path()
 	if err != nil {
@@ -41,6 +44,28 @@ func Open(schema string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		return nil, err
 	}
+	db, err := open(file, schema)
+	if broken(err) {
+		for _, f := range []string{file, file + "-wal", file + "-shm"} {
+			if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, err
+			}
+		}
+		db, err = open(file, schema)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	return db, nil
+}
+
+// broken reports whether err says that the database file is not a database or is damaged.
+func broken(err error) bool {
+	var e *sqlite.Error
+	return errors.As(err, &e) && (e.Code()&0xff == sqlite3.SQLITE_NOTADB || e.Code()&0xff == sqlite3.SQLITE_CORRUPT)
+}
+
+func open(file, schema string) (*sql.DB, error) {
 	// A URI with an escaped path: a ? or % in the path is a part of the name, not the start of the query.
 	uri := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(file), "/")}
 	db, err := sql.Open("sqlite", uri.String()+
@@ -51,11 +76,11 @@ func Open(schema string) (*sql.DB, error) {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;` +
 		schema); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("%s: %w", file, err)
+		return nil, err
 	}
 	if err := sweep(db, time.Now()); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("%s: %w", file, err)
+		return nil, err
 	}
 	return db, nil
 }

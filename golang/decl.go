@@ -11,16 +11,6 @@ import (
 	agentlsp "github.com/hakastein/agent-lsp"
 )
 
-// The kinds of Go symbols.
-const (
-	kindFunc   = "func"
-	kindMethod = "method"
-	kindType   = "type"
-	kindField  = "field" // a field of a struct, also an embedded one
-	kindVar    = "var"
-	kindConst  = "const"
-)
-
 // source is a parsed file and its text.
 type source struct {
 	path string
@@ -63,7 +53,7 @@ func (s source) declaration(name *ast.Ident, node ast.Node, signature string, do
 // types and the methods of interface types, variables and constants at the top level.
 func (s source) symbols() []agentlsp.Symbol {
 	var out []agentlsp.Symbol
-	add := func(name *ast.Ident, kind, container string, node ast.Node, signature string, doc *ast.CommentGroup) {
+	add := func(name *ast.Ident, kind agentlsp.Kind, container string, node ast.Node, signature string, doc *ast.CommentGroup) {
 		if name.Name == "_" {
 			return
 		}
@@ -75,19 +65,19 @@ func (s source) symbols() []agentlsp.Symbol {
 	var fields func(typ ast.Expr, container string)
 	fields = func(typ ast.Expr, container string) {
 		var list *ast.FieldList
-		kind := kindField
+		kind := agentlsp.KindField
 		switch t := typ.(type) {
 		case *ast.StructType:
 			list = t.Fields
 		case *ast.InterfaceType:
-			list, kind = t.Methods, kindMethod
+			list, kind = t.Methods, agentlsp.KindMethod
 		default:
 			return
 		}
 		for _, f := range list.List {
 			sig := s.firstLine(f)
 			if len(f.Names) == 0 {
-				if name := embedded(f.Type); name != nil && kind == kindField {
+				if name := embedded(f.Type); name != nil && kind == agentlsp.KindField {
 					add(name, kind, container, f, sig, f.Doc)
 				}
 				continue
@@ -103,14 +93,14 @@ func (s source) symbols() []agentlsp.Symbol {
 		case *ast.FuncDecl:
 			sig := s.funcSignature(decl)
 			if decl.Recv.NumFields() == 0 {
-				add(decl.Name, kindFunc, "", decl, sig, decl.Doc)
+				add(decl.Name, agentlsp.KindFunc, "", decl, sig, decl.Doc)
 				continue
 			}
 			container := ""
 			if recv := receiver(decl.Recv.List[0].Type); recv != nil {
 				container = recv.Name
 			}
-			add(decl.Name, kindMethod, container, decl, sig, decl.Doc)
+			add(decl.Name, agentlsp.KindMethod, container, decl, sig, decl.Doc)
 		case *ast.GenDecl:
 			for _, spec := range decl.Specs {
 				// A spec alone in a declaration without parentheses is the whole declaration with its doc.
@@ -121,12 +111,12 @@ func (s source) symbols() []agentlsp.Symbol {
 				}
 				switch spec := spec.(type) {
 				case *ast.TypeSpec:
-					add(spec.Name, kindType, "", node, s.typeSignature(spec), doc)
+					add(spec.Name, agentlsp.KindType, "", node, s.typeSignature(spec), doc)
 					fields(spec.Type, spec.Name.Name)
 				case *ast.ValueSpec:
-					kind := kindVar
+					kind := agentlsp.KindVar
 					if decl.Tok == token.CONST {
-						kind = kindConst
+						kind = agentlsp.KindConst
 					}
 					sig := decl.Tok.String() + " " + s.firstLine(spec)
 					for _, name := range spec.Names {

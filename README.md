@@ -44,14 +44,18 @@ refs, err := ix.References(pos)           // refs.Uses, refs.Implementations, re
   stands in the file, comment markers included (its lines come right before `Range.Line`), and the `Origin`:
   `""` for the root, `"std"` for the standard library, `"module"` for a dependency outside the root, `"vendor"` for
   a vendor directory of the root. A question on a declaration answers that declaration.
-- A `Symbol` is a declaration with its `Name`, `Kind` (named by the language package) and `Container` (the type of
-  a method or a field; `""` at the top level).
+- A `Symbol` is a declaration with its `Name`, `Kind` and `Container` (the type of a method or a field; `""` at the
+  top level). The kinds are constants shared by the languages: `agentlsp.KindFunc`, `KindMethod`, `KindType`,
+  `KindField`, `KindVar`, `KindConst`; a kind prints as `func`, `method`, `type`, `field`, `var`, `const`.
 - The name for `Symbols` is qualified with dots: `Func`, `Type.Method`, `pkg.Func`, `pkg.Type.Method`; the package
   is its name or its path. A bare name matches the last segment of every qualified name. In PHP the form is
   `Class::method`.
 
 - A position is an absolute path, a 1-based line and a 1-based column in bytes. Locations in answers use the same
   units, with an exclusive end.
+- A path of a file of the root, in a position and in an answer, starts with the root as `Open` got it, made absolute
+  but with symlinks not resolved: a root opened through a symlink is walked through it and answers with paths through
+  it. Files outside the root (the standard library, dependencies) have the paths the language tools report.
 - A position that is not a place in a file of the root (a relative path, a file outside the root or one that does
   not exist, a line or a column outside the file) is an error that repeats the position and names the problem. A
   place in a file of the root where no symbol is, such as whitespace or a comment, gives an empty answer and no
@@ -59,7 +63,7 @@ refs, err := ix.References(pos)           // refs.Uses, refs.Implementations, re
   break (`\n` or `\r\n`) is not a column.
 - An operation a language does not implement fails with an error that `errors.Is(err, agentlsp.ErrNotSupported)`.
 - `Open` takes an optional func for diagnostic lines (skipped files, syntax errors, whether the index was built or
-  reused); they are not a contract.
+  reused); they are not a contract. `Close` may be called again; the second call does nothing.
 
 ## Go
 
@@ -68,8 +72,8 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
 
 - `Definition` resolves by types, also into the standard library and dependencies; locals, parameters, fields,
   interface methods and labels are declarations too.
-- `Symbols` searches the packages of the root, test files included; dependencies are not searched. Kinds: `func`,
-  `method`, `type`, `field`, `var`, `const`.
+- `Symbols` searches the packages of the root, test files included; dependencies are not searched. It gives all
+  six kinds.
 - `Outline` lists the declarations of a file in order: functions, methods, types, the fields of struct types and the
   methods of interface types, top-level variables and constants. It reads the syntax of the file only.
 - `References` and `Rename` are not supported.
@@ -81,12 +85,13 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
   reports for the root live in one SQLite file under the user's cache directory: `agent-lsp/cache.sqlite`. Every
   call is a new process, so a call reuses what an earlier one computed.
 - The packages of the root are listed again only when `go.mod`, `go.sum`, `go.work`, the set of `.go` files, or the
-  package name, imports or build constraints of a file change, or the toolchain, `GOOS`, `GOARCH` or build flags
-  differ. An edit of a function body is seen by the next call without listing again.
+  package name, imports or build constraints of a file change, or the toolchain, `GOOS`, `GOARCH`, build flags or
+  the settings of `go env -w` differ. An edit of a function body is seen by the next call without listing again.
 - Keys hold the schema, the fork and the Go version the binary is built with: entries of another build are not read.
 - Two worktrees of one module share the entries of the standard library and the module cache; each computes the
   packages of its own files once, since gopls keys and export data hold file paths.
-- An entry not used for 14 days is deleted along the way.
+- An entry not used for 14 days is deleted along the way. A cache file that is not an SQLite database or is damaged
+  is made again; any other error of opening it fails `Open`.
 - The diagnostic lines say whether the packages were loaded or reused and how many cache entries were reused,
   missed and written.
 
@@ -145,7 +150,8 @@ return types or PHPDoc.
 - `Open` builds the index of the root or reuses it, and answers come from the files as they were at `Open`. It
   compares the files under the root (path and content hash of every `.php` file) with the ones the index was built
   from: if they are the same, the index is used as it is; otherwise it is built again as a whole.
-- The index is one SQLite file per root under the user's cache directory (`os.UserCacheDir()`) in `agent-lsp/php/`.
+- The index is one SQLite file per root under the user's cache directory (`os.UserCacheDir()`) in `agent-lsp/php/`,
+  apart from the cache file of Go.
 - Symbolic links to files and directories are followed, also outside the root; a file is named by its path through
   the link, and a directory already on the path from the root is not walked again. Only regular files are read.
 - Skipped on purpose, and only these: an entry that is not a regular file (a named pipe, a socket, a device), a

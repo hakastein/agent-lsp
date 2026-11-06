@@ -28,12 +28,16 @@
   `golang.org/x/tools` (`go/ast/inspector`, `go/types/objectpath` и т.п.) — зависимость `go.mod` той версии, что
   выберет сборка (не ниже записанной там): их API совместим между версиями, а закрепить старую версию нельзя —
   потребитель с более новой `x/tools` всё равно поднимет её.
+- Из `vulncheck` в форке только типы результатов, которые импортирует `cache`: `vulncheck/types.go`,
+  `vulncheck/govulncheck/{govulncheck,handler,jsonhandler}.go`, `vulncheck/osv/osv.go`; govulncheck форк не запускает.
+- `test/integration/fake/glob/glob.go` — сопоставление glob-шаблонов, которое импортирует `cache/workspace.go`;
+  upstream держит его в каталоге интеграционных тестов, но это не тест.
 - `go/packages` скопирован, хотя он публичный: он делит состояние с `internal/packagesinternal` (функцию
   `GetDepsErrors`), а копия `packagesinternal` из форка с пакетом из модуля это состояние не делит.
 
 ## Правки
 
-Удалённые файлы — файлы протокола LSP, анализаторов, vulncheck и операций, которых agent-lsp не вызывает:
+Удалённые файлы — файлы протокола LSP, анализаторов, запуска govulncheck и операций, которых agent-lsp не вызывает:
 
 - `cache/analysis.go` (драйвер анализаторов), `cache/mod_vuln.go` (govulncheck);
 - `settings/analysis.go`, `settings/staticcheck.go` (списки анализаторов и staticcheck);
@@ -56,7 +60,8 @@
 - `filecache/filecache.go` переписан: кэш — таблица SQLite (`Open`, `Flush`, `Stats`), `Set` копит значения в памяти
   до `Flush`, ключ строки включает соль; `GetOrFatal` не завершает процесс, ошибка чтения — промах. Сборщика мусора
   по файлам нет: старые строки удаляет `internal/cachedb`.
-- `cache/view.go`: поле `Folder.Load` — замена `packages.Load` для загрузок папки.
+- `cache/view.go`: поле `Folder.Load` — замена `packages.Load` для загрузок папки; поле `GoEnv.GOENV` — файл настроек
+  `go env -w`, `FetchGoEnv` спрашивает его тем же вызовом `go env`.
 - `cache/load.go`: `Snapshot.load` вызывает `Folder.Load`, если оно задано.
 - `cache/errors.go`: удалена `toSourceDiagnostic` (нужна только `cache/analysis.go`).
 - `settings/settings.go`: `CounterPath` — свой тип `[]string` вместо `telemetry.CounterPath` (без телеметрии).

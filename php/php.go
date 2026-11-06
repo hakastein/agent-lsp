@@ -159,7 +159,7 @@ func Open(root string, logf func(format string, args ...any)) (*Index, error) {
 	return ix, nil
 }
 
-// Close closes the index file.
+// Close closes the index file. A second Close does nothing.
 func (ix *Index) Close() error {
 	return ix.db.Close()
 }

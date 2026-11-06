@@ -50,9 +50,9 @@ type loader struct {
 }
 
 // load is packages.Load that reuses a stored answer. The answer depends on the configuration (directory, patterns,
-// the GO* and CGO_* environment, build flags, mode), the Go toolchain, and the files: the go.mod, go.sum, go.work
-// and vendor/modules.txt files, and which .go files there are with their package names, imports and build
-// constraints. A change of a function body is not a change of the answer.
+// the GO* and CGO_* environment and the file of go env -w, build flags, mode), the Go toolchain, and the files: the
+// go.mod, go.sum, go.work and vendor/modules.txt files, and which .go files there are with their package names,
+// imports and build constraints. A change of a function body is not a change of the answer.
 func (l *loader) load(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
 	if len(cfg.Overlay) > 0 {
 		return l.fresh(cfg, patterns)
@@ -106,7 +106,11 @@ func (l *loader) configKey(cfg *packages.Config, patterns []string) [sha256.Size
 		}
 	}
 	slices.Sort(env)
-	fmt.Fprintf(h, "%q\x00%s/%s", env, l.env.GOOS, l.env.GOARCH)
+	fmt.Fprintf(h, "%q\x00%s/%s\x00", env, l.env.GOOS, l.env.GOARCH)
+	if filepath.IsAbs(l.env.GOENV) { // not "off"
+		goenv, _ := os.ReadFile(l.env.GOENV) // no file is no settings
+		h.Write(goenv)
+	}
 	var sum [sha256.Size]byte
 	h.Sum(sum[:0])
 	return sum
@@ -182,7 +186,7 @@ type header struct {
 // walk lists the files under dir a load depends on, as the go command walks a pattern "dir/...": it skips the
 // directories named testdata or starting with . or _. Each .go file is named by the hash of its header; go.mod, go.sum,
 // go.work, go.work.sum and vendor/modules.txt by the hash of their content. A .go file whose size and modification
-// time are those stored is not read again.
+// time are those stored is not read again. A dir that is a symlink is walked through it, as the go command does.
 func (l *loader) walk(dir string) ([]header, error) {
 	type row struct {
 		size, mtime int64
@@ -206,23 +210,27 @@ func (l *loader) walk(dir string) ([]header, error) {
 		return nil, err
 	}
 
+	top, err := filepath.EvalSymlinks(dir) // WalkDir does not follow a root that is a symlink
+	if err != nil {
+		return nil, err
+	}
 	var out []header
 	changed := map[string]row{}
-	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(top, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if p == dir {
+			if p == top {
 				return err
 			}
 			return nil // the go command does not list what it cannot read either
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if p != dir && (name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+			if p != top && (name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		rel, _ := filepath.Rel(dir, p)
+		rel, _ := filepath.Rel(top, p)
 		rel = filepath.ToSlash(rel)
 		switch {
 		case strings.HasSuffix(name, ".go"):
@@ -254,9 +262,6 @@ func (l *loader) walk(dir string) ([]header, error) {
 	})
 	if err != nil {
 		return nil, err
-	}
-	if len(changed)+len(stored) == 0 {
-		return out, nil
 	}
 	tx, err := l.db.Begin()
 	if err != nil {

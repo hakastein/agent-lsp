@@ -95,6 +95,23 @@ func TestDefinitionInStandardLibrary(t *testing.T) {
 	assert.NotEmpty(t, got[0].Doc)
 }
 
+// A declaration under the vendor directory of the root is of a vendored dependency.
+func TestDefinitionInVendor(t *testing.T) {
+	cache(t)
+	root := filepath.Join(filepath.Dir(newRoot(t)), "vendored")
+	var got []agentlsp.Declaration
+	session(t, root, func(ix *golang.Index) {
+		var err error
+		got, err = ix.Definition(place{"main.go", "Amount(300)"}.position(t, root))
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, declarations(t, root, []decl{{
+		name: place{"vendor/example.com/money/money.go", "Amount int64"}, from: "type Amount int64", to: "type Amount int64",
+		signature: "type Amount int64", doc: "// Amount is a sum in cents.", origin: agentlsp.OriginVendor,
+	}}), got)
+}
+
 func TestDefinitionPositionErrors(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
@@ -238,6 +255,9 @@ func TestReopen(t *testing.T) {
 			edit(t, root, cartGo, `"fmt"`, `"fmt"
 	_ "strings"`)
 		}, loaded},
+		{"an edit of go.mod loads again", func() {
+			edit(t, root, "go.mod", "go 1.26", "go 1.26\n\n// A module of a shop.")
+		}, loaded},
 		{"a new file loads again", func() {
 			require.NoError(t, os.WriteFile(filepath.Join(root, "cart", "empty.go"), []byte("package cart\n"), 0o600))
 		}, loaded},
@@ -280,22 +300,31 @@ func TestSecondWorktree(t *testing.T) {
 	assert.Equal(t, declarations(t, second, []decl{add}), got)
 }
 
-// A stored load of packages depends on the target platform and the build flags; a load for another one is never
-// reused.
+// A stored load of packages depends on the target platform and the build flags, as the go command sees them: from
+// the environment of the process and from the file of go env -w (GOENV). A load for another one is never reused.
 func TestLoadOfAnotherPlatformIsNotReused(t *testing.T) {
+	setenv := func(name, value string) func(t *testing.T, goenv string) {
+		return func(t *testing.T, _ string) { t.Setenv(name, value) }
+	}
 	tests := []struct {
-		name, env, value string
+		name   string
+		change func(t *testing.T, goenv string)
 	}{
-		{"GOOS", "GOOS", "windows"},
-		{"GOARCH", "GOARCH", "arm64"},
-		{"build tags", "GOFLAGS", "-tags=premium"},
+		{"GOOS", setenv("GOOS", "windows")},
+		{"GOARCH", setenv("GOARCH", "arm64")},
+		{"build tags", setenv("GOFLAGS", "-tags=premium")},
+		{"build tags of go env -w", func(t *testing.T, goenv string) {
+			require.NoError(t, os.WriteFile(goenv, []byte("GOFLAGS=-tags=premium\n"), 0o600))
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cache(t)
 			root := newRoot(t)
+			goenv := filepath.Join(t.TempDir(), "env")
+			t.Setenv("GOENV", goenv)
 			session(t, root, func(*golang.Index) {})
-			t.Setenv(tt.env, tt.value)
+			tt.change(t, goenv)
 
 			log := session(t, root, func(*golang.Index) {})
 
@@ -303,6 +332,42 @@ func TestLoadOfAnotherPlatformIsNotReused(t *testing.T) {
 			assert.NotContains(t, log, reused)
 		})
 	}
+}
+
+// A root opened through a symlink is walked through it: a file added under it is seen by the next Open. Answers name
+// files by their paths through the root as Open got it, the paths the positions use.
+func TestSymlinkedRoot(t *testing.T) {
+	cache(t)
+	root := filepath.Join(t.TempDir(), "shop")
+	symlink(t, newRoot(t), root)
+	session(t, root, func(*golang.Index) {})
+	require.NoError(t, os.WriteFile(filepath.Join(root, "cart", "extra.go"), []byte("package cart\n\nfunc Extra() {}\n"), 0o600))
+
+	var defs []agentlsp.Declaration
+	var syms []agentlsp.Symbol
+	log := session(t, root, func(ix *golang.Index) {
+		var err error
+		defs, err = ix.Definition(place{"main.go", "Add(cart.Item"}.position(t, root))
+		require.NoError(t, err)
+		syms, err = ix.Symbols("Extra")
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, log, loaded)
+	assert.Equal(t, declarations(t, root, []decl{add}), defs)
+	assert.Equal(t, symbols(t, root, []symbol{{"Extra", "func", "", decl{
+		name: place{"cart/extra.go", "Extra() {}"}, from: "func Extra", to: "func Extra() {}", signature: "func Extra()",
+	}}}), syms)
+}
+
+// Close may be called again; the second call does nothing.
+func TestCloseTwice(t *testing.T) {
+	cache(t)
+	ix, err := golang.Open(newRoot(t), nil)
+	require.NoError(t, err)
+	require.NoError(t, ix.Close())
+
+	assert.NoError(t, ix.Close())
 }
 
 func TestNotSupported(t *testing.T) {
@@ -316,6 +381,19 @@ func TestNotSupported(t *testing.T) {
 	})
 	assert.ErrorIs(t, refsErr, agentlsp.ErrNotSupported)
 	assert.ErrorIs(t, renameErr, agentlsp.ErrNotSupported)
+}
+
+// The gopls cache is global to the process: a second Open while an index is open fails.
+func TestOpenWhileAnotherIsOpen(t *testing.T) {
+	cache(t)
+	root := newRoot(t)
+	first, err := golang.Open(root, nil)
+	require.NoError(t, err)
+	defer first.Close()
+
+	_, err = golang.Open(root, nil)
+
+	assert.ErrorContains(t, err, "another Go index is open")
 }
 
 func TestOpenErrors(t *testing.T) {

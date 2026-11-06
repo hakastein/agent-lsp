@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -20,6 +21,17 @@ func newRoot(t *testing.T) string {
 	dir := t.TempDir()
 	require.NoError(t, os.CopyFS(dir, os.DirFS("testdata")))
 	return filepath.Join(dir, "shop")
+}
+
+// symlink makes link point at target. Where the OS does not let the user make symlinks, as on Windows without the
+// privilege, the test is skipped.
+func symlink(t *testing.T, target, link string) {
+	t.Helper()
+	err := os.Symlink(target, link)
+	if err != nil && runtime.GOOS == "windows" {
+		t.Skipf("no symlinks on this system: %v", err)
+	}
+	require.NoError(t, err)
 }
 
 // cache gives the rest of the test a fresh user cache directory, so the caches of tests never meet and never touch
@@ -131,7 +143,9 @@ func declarations(t *testing.T, root string, decls []decl) []agentlsp.Declaratio
 
 // symbol is a symbol under the root.
 type symbol struct {
-	name, kind, container string
+	name      string
+	kind      agentlsp.Kind
+	container string
 	decl
 }
 

@@ -45,13 +45,13 @@ var open sync.Mutex
 
 // Index answers questions about the Go code of one root.
 type Index struct {
-	root     string
-	env      cache.GoEnv
-	logf     func(string, ...any)
-	session  *cache.Session
-	snapshot *cache.Snapshot
-	release  func()
-	closeDB  func() error
+	root    string
+	env     cache.GoEnv
+	logf    func(string, ...any)
+	session *cache.Session
+	view    *cache.Snapshot // the gopls view of the root as Open loaded it
+	release func()
+	closeDB func() error
 }
 
 // Open opens the Go code of root, a directory with a go.mod or a go.work file, and loads its packages: the stored
@@ -98,7 +98,7 @@ func openIndex(root string, logf func(string, ...any)) (*Index, error) {
 	}
 	l := &loader{db: db, env: *env, logf: logf}
 	session := cache.NewSession(ctx, cache.New(nil))
-	_, snapshot, release, err := session.NewView(ctx, &cache.Folder{
+	_, view, release, err := session.NewView(ctx, &cache.Folder{
 		Dir: dir, Name: filepath.Base(root), Options: opts, Env: *env, Load: l.load,
 	})
 	if err != nil {
@@ -106,8 +106,8 @@ func openIndex(root string, logf func(string, ...any)) (*Index, error) {
 		db.Close()
 		return nil, fmt.Errorf("go: %w", err)
 	}
-	snapshot.AwaitInitialized(ctx)
-	if e := snapshot.InitializationError(); e != nil {
+	view.AwaitInitialized(ctx)
+	if e := view.InitializationError(); e != nil {
 		release()
 		session.Shutdown(ctx)
 		db.Close()
@@ -118,15 +118,19 @@ func openIndex(root string, logf func(string, ...any)) (*Index, error) {
 	} else {
 		logf("go: packages reused: %d", l.reused)
 	}
-	return &Index{root: root, env: *env, logf: logf, session: session, snapshot: snapshot, release: release,
+	return &Index{root: root, env: *env, logf: logf, session: session, view: view, release: release,
 		closeDB: db.Close}, nil
 }
 
-// Close writes what the gopls cache computed to the cache database and closes it.
+// Close writes what the gopls cache computed to the cache database and closes it. A second Close does nothing.
 func (ix *Index) Close() error {
+	if ix.session == nil {
+		return nil
+	}
 	defer open.Unlock()
 	ix.release()
 	ix.session.Shutdown(context.Background())
+	ix.session = nil
 	hits, misses := filecache.Stats()
 	written, err := filecache.Flush()
 	ix.logf("go: cache: %d reused, %d missed, %d written", hits, misses, written)
@@ -146,7 +150,7 @@ func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Declaration, erro
 	}
 	ctx := context.Background()
 	uri := protocol.URIFromPath(pos.File)
-	fh, err := ix.snapshot.ReadFile(ctx, uri)
+	fh, err := ix.view.ReadFile(ctx, uri)
 	if err != nil {
 		return nil, fmt.Errorf("go: %w", err)
 	}
@@ -154,7 +158,7 @@ func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Declaration, erro
 	if err != nil {
 		return nil, fmt.Errorf("go: %w", err)
 	}
-	locs, err := gopls.Definition(ctx, ix.snapshot, fh, protocol.Range{Start: at, End: at})
+	locs, err := gopls.Definition(ctx, ix.view, fh, protocol.Range{Start: at, End: at})
 	if err != nil {
 		return nil, fmt.Errorf("go: definition at %s:%d:%d: %w", pos.File, pos.Line, pos.Column, err)
 	}
@@ -200,18 +204,18 @@ func (ix *Index) Symbols(name string) ([]agentlsp.Symbol, error) {
 	ctx := context.Background()
 	last := name[strings.LastIndex(name, ".")+1:]
 	var ids []cache.PackageID
-	for id := range ix.snapshot.WorkspacePackages().All() {
+	for id := range ix.view.WorkspacePackages().All() {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
-	index, err := ix.snapshot.Symbols(ctx, ids...)
+	index, err := ix.view.Symbols(ctx, ids...)
 	if err != nil {
 		return nil, fmt.Errorf("go: symbols: %w", err)
 	}
 	type candidate struct{ pkgName, pkgPath string }
 	files := map[string]candidate{}
 	for i, pkg := range index {
-		mp := ix.snapshot.Metadata(ids[i])
+		mp := ix.view.Metadata(ids[i])
 		for j, syms := range pkg.Symbols {
 			for _, sym := range syms {
 				if sym.Name[strings.LastIndex(sym.Name, ".")+1:] == last {
