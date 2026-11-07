@@ -90,18 +90,15 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
 - Keys hold the schema, the fork and the Go version the binary is built with: entries of another build are not read.
 - Two worktrees of one module share the entries of the standard library and the module cache; each computes the
   packages of its own files once, since gopls keys and export data hold file paths.
-- An entry not used for 14 days is deleted along the way. A cache file that is not an SQLite database or is damaged
-  is made again: what it holds can be computed again. Damage that `Open` of the file does not see is found later by
-  a read or a write. When `Open` finds it, `Open` makes the file again and goes on. When the gopls cache finds it,
-  the read is a miss; when a later load of packages does, that question fails. Either way `Close` removes the file,
-  and the next call makes it again. A file that another process has already made again is not removed, and a
-  read or a write that failed on the old file is not an error: `Open` opens again, `Close` drops what was not
-  written. A damaged file that cannot be removed, as on Windows while another process holds it open, fails no call
-  either: when `Open` finds the damage, the call goes on with a cache in memory and computes its answer again; when
-  `Close` does, it leaves the file. The next call removes the file, or goes on in memory while it still cannot. Any
-  other error of opening the file fails `Open`.
-- Processes open, make and remove the cache file one at a time, under the lock of `agent-lsp/cache.sqlite.lock` next
-  to it: calls that start at once on a missing or damaged file all succeed.
+- An entry not used for 14 days is deleted along the way. A cache file that is not an SQLite database, or whose
+  damage shows when it is opened (making its tables, sweeping them), is removed and made again empty, and the call
+  goes on: what the file held is computed again. A damaged file that cannot be removed fails `Open` with an error
+  that names it. Damage found later, by a load of packages (also the one of `Open`) or by `Close` writing the gopls
+  cache, is an SQLite error of that call with the path of the file (a failed read of the gopls cache is a miss);
+  nothing repairs it: remove the file, and the next call indexes again. SQLite keeps the file whole when a process
+  dies (WAL, a transaction per write), so damage comes from outside.
+- Processes open and make the cache file one at a time, under the lock of `agent-lsp/cache.sqlite.lock` next to
+  it: calls that start at once on a missing or damaged file all succeed.
 - The diagnostic lines say whether the packages were loaded or reused and how many cache entries were reused,
   missed and written.
 

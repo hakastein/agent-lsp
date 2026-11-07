@@ -1,7 +1,6 @@
 package cachedb_test
 
 import (
-	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -98,68 +97,6 @@ func TestOpenAtOnce(t *testing.T) {
 	}
 }
 
-// After a query says that the database is damaged, CloseAfter removes it, and the next Open makes a new one. A
-// process that finds the damage after another has made the database again leaves the new database be. Another error
-// is an error, unless it is of a database made again since.
-func TestCloseAfter(t *testing.T) {
-	damaged, other := damage(t), errors.New("another error")
-	for _, tc := range []struct {
-		name      string
-		err       error
-		meanwhile func(t *testing.T) // what other processes do before CloseAfter
-		wantErr   error
-		want      []string
-	}{
-		{"a damage removes the database", damaged, func(*testing.T) {}, nil, nil},
-		{"a damage keeps a database made again since Open", damaged, makeAgain, nil, []string{"made again"}},
-		{"another error is an error", other, func(*testing.T) {}, other, []string{"before the damage"}},
-		{"another error of a database made again since Open is dropped", other, makeAgain, nil, []string{"made again"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cache(t)
-			db := opened(t)
-			tc.meanwhile(t)
-
-			assert.ErrorIs(t, db.CloseAfter(tc.err), tc.wantErr)
-
-			db, err := cachedb.Open(schema)
-			require.NoError(t, err)
-			defer db.Close()
-			assert.Equal(t, tc.want, keys(t, db, "facts"))
-		})
-	}
-}
-
-// A damaged cache file that cannot be removed, as on Windows while another process holds it open, fails no call:
-// Open goes on with a database in memory, CloseAfter leaves the file to the next Open, which removes it.
-func TestDamageThatCannotBeRemoved(t *testing.T) {
-	damaged := damage(t)
-	for _, tc := range []struct {
-		name    string
-		prepare func(t *testing.T) func() error // returns the call that finds the damage
-	}{
-		{"found by Open", func(t *testing.T) func() error { opened(t); garbage(t); return write }},
-		{"found by a query", func(t *testing.T) func() error {
-			db := opened(t)
-			return func() error { return db.CloseAfter(damaged) }
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cache(t)
-			call := tc.prepare(t)
-			removable := unremovable(t)
-			err := call()
-			removable()
-
-			db, openErr := cachedb.Open(schema)
-			require.NoError(t, openErr)
-			defer db.Close()
-			assert.NoError(t, err)
-			assert.Empty(t, keys(t, db, "facts"))
-		})
-	}
-}
-
 // keys is the keys of the rows of table.
 func keys(t *testing.T, db *cachedb.DB, table string) []string {
 	t.Helper()
@@ -182,69 +119,6 @@ func garbage(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
 	require.NoError(t, os.WriteFile(file, []byte("garbage garbage garbage"), 0o600))
-}
-
-// opened opens the cache database, writes a row and closes it, so that another process may remove the file, as on
-// Windows; it returns the closed database for CloseAfter.
-func opened(t *testing.T) *cachedb.DB {
-	t.Helper()
-	db, err := cachedb.Open(schema)
-	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO facts (key, used) VALUES (?, ?)`, "before the damage", time.Now().Unix())
-	require.NoError(t, err)
-	require.NoError(t, db.Close())
-	return db
-}
-
-// write opens the cache database, writes a row and closes it.
-func write() error {
-	db, err := cachedb.Open(schema)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(`INSERT INTO facts (key, used) VALUES (?, ?)`, "written", time.Now().Unix())
-	return errors.Join(err, db.Close())
-}
-
-// unremovable takes from the user the right to remove files in the directory of the cache database and returns the
-// function that gives it back. Where the user removes files anyway, as root does, the test is skipped.
-func unremovable(t *testing.T) func() {
-	t.Helper()
-	file, err := cachedb.Path()
-	require.NoError(t, err)
-	dir := filepath.Dir(file)
-	require.NoError(t, os.Chmod(dir, 0o555))
-	removable := func() { require.NoError(t, os.Chmod(dir, 0o755)) }
-	t.Cleanup(removable)
-	if err := os.WriteFile(filepath.Join(dir, "probe"), nil, 0o600); err == nil {
-		removable()
-		t.Skip("the mode of a directory does not stop the user removing files in it: root, or Windows")
-	}
-	return removable
-}
-
-// makeAgain is another process that finds the cache database damaged: Open makes a new one, and a row goes in.
-func makeAgain(t *testing.T) {
-	t.Helper()
-	garbage(t)
-	db, err := cachedb.Open(schema)
-	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO facts (key, used) VALUES (?, ?)`, "made again", time.Now().Unix())
-	require.NoError(t, err)
-	require.NoError(t, db.Close())
-}
-
-// damage is an error of SQLite that says a file is not a database.
-func damage(t *testing.T) error {
-	t.Helper()
-	file := filepath.Join(t.TempDir(), "garbage")
-	require.NoError(t, os.WriteFile(file, []byte("garbage garbage garbage"), 0o600))
-	db, err := sql.Open("sqlite", file)
-	require.NoError(t, err)
-	defer db.Close()
-	_, err = db.Exec(`SELECT * FROM sqlite_schema`)
-	require.True(t, cachedb.Damaged(err), err)
-	return err
 }
 
 // openAtOnce opens the cache database n times at once, each with connections of its own, as n processes would; it

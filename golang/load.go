@@ -43,24 +43,20 @@ CREATE INDEX IF NOT EXISTS go1_loads_used ON go1_loads (used);
 
 // loader loads packages for a view, reusing the stored answer of a load whose configuration and files are the same.
 type loader struct {
-	db      *sql.DB
-	env     cache.GoEnv
-	logf    func(string, ...any)
-	loaded  int   // packages a load returned
-	reused  int   // packages a stored answer returned
-	damaged error // the error of a load that found the cache database damaged; Close removes the database
+	db     *cachedb.DB
+	env    cache.GoEnv
+	logf   func(string, ...any)
+	loaded int // packages a load returned
+	reused int // packages a stored answer returned
 }
 
 // load is packages.Load that reuses a stored answer. The answer depends on the configuration (directory, patterns,
 // the GO* and CGO_* environment and the file of go env -w, build flags, mode), the Go toolchain, and the files: the
 // go.mod, go.sum, go.work and vendor/modules.txt files, and which .go files there are with their package names,
-// imports and build constraints. A change of a function body is not a change of the answer.
+// imports and build constraints. A change of a function body is not a change of the answer. An error of the cache
+// database names its file.
 func (l *loader) load(cfg *packages.Config, patterns ...string) (_ []*packages.Package, err error) {
-	defer func() {
-		if cachedb.Damaged(err) {
-			l.damaged = err
-		}
-	}()
+	defer func() { err = l.db.Err(err) }()
 	if len(cfg.Overlay) > 0 {
 		return l.fresh(cfg, patterns)
 	}

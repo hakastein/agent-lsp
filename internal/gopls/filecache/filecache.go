@@ -19,7 +19,6 @@
 package filecache
 
 import (
-	"cmp"
 	"crypto/sha256"
 	"database/sql"
 	"errors"
@@ -58,7 +57,6 @@ var (
 	salt    []byte
 	pending = map[[32]byte][]byte{} // values Set since the last Flush, by row key
 	touched = map[[32]byte]bool{}   // rows hit since the last Flush whose use is older than touchAfter
-	readErr error                   // the first error of a read from the database since the last Flush
 
 	hits, misses int
 )
@@ -77,7 +75,6 @@ func Open(d *sql.DB, name string, s []byte) error {
 	db, table, salt = d, name, s
 	clear(pending)
 	clear(touched)
-	readErr = nil
 	hits, misses = 0, 0
 	memCache = lru.New[memKey, any](100 * 1e6)
 	return nil
@@ -91,14 +88,12 @@ func Stats() (hit, miss int) {
 }
 
 // Flush writes the values buffered by Set and the times of use of the rows read since the last
-// Flush in one transaction, and returns how many values it wrote. A read since the last Flush
-// that failed is an error of Flush as well: [Get] took it for a miss.
+// Flush in one transaction, and returns how many values it wrote.
 func Flush() (n int, err error) {
 	mu.Lock()
-	d, values, uses, failed := db, pending, touched, readErr
-	pending, touched, readErr = map[[32]byte][]byte{}, map[[32]byte]bool{}, nil
+	d, values, uses := db, pending, touched
+	pending, touched = map[[32]byte][]byte{}, map[[32]byte]bool{}
 	mu.Unlock()
-	defer func() { err = errors.Join(failed, err) }()
 	if d == nil || len(values)+len(uses) == 0 {
 		return 0, nil
 	}
@@ -206,7 +201,6 @@ func get(kind string, key [32]byte) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		readErr = cmp.Or(readErr, err)
 		return nil, err
 	}
 	hits++

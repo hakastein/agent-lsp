@@ -370,65 +370,6 @@ func TestCloseTwice(t *testing.T) {
 	assert.NoError(t, ix.Close())
 }
 
-// A damaged cache database fails no question. Damage the load of packages finds at Open makes Open open the cache
-// database again, and the next call reuses it. Damage a read of the gopls cache finds is a miss; Close removes the
-// cache database, and the next call loads the packages again.
-func TestDamagedCache(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		at   func(size int64) (from, to int64) // the bytes of the cache database the damage overwrites
-		next string                            // what the call after the damaged one does with the packages
-	}{
-		// From the third page (of SQLite's default 4096 bytes) on, past the schema and the bookkeeping of the cache.
-		{"found at Open", func(size int64) (int64, int64) { return 2 * 4096, size }, reused},
-		// The last quarter: the pages of the gopls cache, which Close of a call on an empty cache writes last.
-		{"found by the gopls cache", func(size int64) (int64, int64) { return size - size/4, size }, loaded},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cache(t)
-			root := newRoot(t)
-			call := place{"main.go", "Add(cart.Item"}
-			var got []agentlsp.Declaration
-			ask := func(ix *golang.Index) {
-				var err error
-				got, err = ix.Definition(call.position(t, root))
-				require.NoError(t, err)
-			}
-			session(t, root, ask)
-			damage(t, tc.at)
-
-			session(t, root, ask)
-			assert.Equal(t, declarations(t, root, []decl{add}), got)
-			assert.Contains(t, session(t, root, ask), tc.next)
-		})
-	}
-}
-
-// Damage that a load of packages after Open finds fails that question. Close removes the cache database, and the next
-// call loads the packages again and answers.
-func TestDamageFoundByALoadAfterOpen(t *testing.T) {
-	cache(t)
-	root := newRoot(t)
-	session(t, root, func(*golang.Index) {})
-	// The seventh page: the index of the stored loads by their time of use, made with the schema. A load that Open
-	// reuses on the day of its last use does not read it; the load of the package of the tool, which no call has
-	// stored, writes it.
-	damage(t, func(int64) (int64, int64) { return 6 * 4096, 7 * 4096 })
-	tool := place{"_tool/tool.go", "Cart\n"}
-	var got []agentlsp.Declaration
-	var err error
-	ask := func(ix *golang.Index) { got, err = ix.Definition(tool.position(t, root)) }
-
-	session(t, root, ask)
-	damagedErr := err
-	log := session(t, root, ask)
-
-	assert.Error(t, damagedErr)
-	assert.Contains(t, log, loaded)
-	assert.NoError(t, err)
-	assert.Equal(t, declarations(t, root, []decl{cartType}), got)
-}
-
 func TestNotSupported(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
