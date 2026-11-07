@@ -130,7 +130,8 @@ func UsedIdent(info *types.Info, e ast.Expr) *ast.Ident {
 }
 
 // usedIdent and interfaceMethod are the bodies of the functions of golang.org/x/tools/go/types/typeutil that
-// upstream reaches by go:linkname; agent-lsp takes that package from a later x/tools, which no longer has them.
+// upstream reaches by go:linkname, from its callee.go at x/tools a299dadba899; typeutil of x/tools v0.52.0, which
+// agent-lsp builds with, has neither.
 func usedIdent(info *types.Info, e ast.Expr) *ast.Ident {
 	if info.Types == nil || info.Uses == nil {
 		panic("one of info.Types or info.Uses is nil; both must be populated")

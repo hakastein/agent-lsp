@@ -2,6 +2,7 @@ package golang_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -315,11 +316,12 @@ func TestOutline(t *testing.T) {
 }
 
 // Each Open is a new process as far as the index goes: a new session of gopls, and the cache database. The stored
-// load of packages serves while the files keep their package names and imports; any other edit is still seen.
+// load of packages serves while the files keep their package names and imports; any other edit is still seen. The
+// question is in a file built for windows only: GOOS of the environment changes no answer.
 func TestReopen(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
-	call := place{"main.go", "Add(cart.Item"}
+	call := place{"cart/discount_windows.go", "Add(it)"}
 
 	steps := []struct {
 		name    string
@@ -341,6 +343,7 @@ func TestReopen(t *testing.T) {
 		{"a new file loads again", func() {
 			require.NoError(t, os.WriteFile(filepath.Join(root, "cart", "empty.go"), []byte("package cart\n"), 0o600))
 		}, loaded},
+		{"GOOS of the environment reuses the load", func() { t.Setenv("GOOS", "darwin") }, reused},
 	}
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
@@ -449,6 +452,25 @@ func TestCloseTwice(t *testing.T) {
 	assert.NoError(t, ix.Close())
 }
 
+// A process of a program that imports the library makes no directory in the user cache directory but its own cache:
+// gopls would make goimports there on start. A test binary keeps it under the temporary directory instead, so the
+// test runs a program built from testdata/open.
+func TestOpenMakesNoGoimportsDirectory(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "open")
+	build := exec.Command("go", "build", "-o", bin, "./testdata/open")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, "go build:\n%s", out)
+	cache(t)
+	dir, err := os.UserCacheDir()
+	require.NoError(t, err)
+
+	out, err = exec.Command(bin, newRoot(t)).CombinedOutput()
+
+	require.NoError(t, err, "%s", out)
+	assert.DirExists(t, filepath.Join(dir, "agent-lsp"))
+	assert.NoDirExists(t, filepath.Join(dir, "goimports"))
+}
 func TestNotSupported(t *testing.T) {
 	cache(t)
 	root := newRoot(t)

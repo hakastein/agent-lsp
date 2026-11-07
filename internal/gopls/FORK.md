@@ -70,9 +70,11 @@
 - `settings/settings.go`: `CounterPath` — свой тип `[]string` вместо `telemetry.CounterPath` (без телеметрии).
 - `util/bug/bug.go`: без счётчика телеметрии `BugReportCount`.
 - `xtools/typesinternal/classify_call.go`: `usedIdent` и `interfaceMethod` — свои тела вместо `go:linkname` на
-  `golang.org/x/tools/go/types/typeutil`: в x/tools, которую берёт сборка, этих функций уже нет (upstream x/tools
-  позже перенёс тела в `typesinternal` так же). Без правки бинарник, вызывающий `golang.Implementation`, не
+  `golang.org/x/tools/go/types/typeutil`: в x/tools v0.52.0 (зависимость `go.mod`) этих функций нет; тела взяты из
+  `go/types/typeutil/callee.go` x/tools `a299dadba899`. Без правки бинарник, вызывающий `golang.Implementation`, не
   собирается.
+- `xtools/modindex/index.go`: каталог индекса `IndexDir` создаёт `write` перед записью индекса, а не инициализация
+  пакета: процесс, который индекс не пишет, не создаёт `<кэш пользователя>/goimports`.
 
 ## Как подтянуть upstream
 
