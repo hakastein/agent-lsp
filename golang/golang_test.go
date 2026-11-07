@@ -456,7 +456,8 @@ func TestCloseTwice(t *testing.T) {
 // gopls would make goimports there on start. A test binary keeps it under the temporary directory instead, so the
 // test runs a program built from testdata/open.
 func TestOpenMakesNoGoimportsDirectory(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "open")
+	// .exe: Windows starts a file only by an executable extension; elsewhere the name does not matter.
+	bin := filepath.Join(t.TempDir(), "open.exe")
 	build := exec.Command("go", "build", "-o", bin, "./testdata/open")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	out, err := build.CombinedOutput()
@@ -471,6 +472,7 @@ func TestOpenMakesNoGoimportsDirectory(t *testing.T) {
 	assert.DirExists(t, filepath.Join(dir, "agent-lsp"))
 	assert.NoDirExists(t, filepath.Join(dir, "goimports"))
 }
+
 func TestNotSupported(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
