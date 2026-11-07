@@ -555,8 +555,8 @@ func (ix *Index) Rename(pos agentlsp.Position, name string) (agentlsp.Renaming, 
 // Symbols is the declarations with the name: a bare name (Cart, add), a name in its class (Cart::add), a name in
 // its namespace (Shop\Cart, \Shop\Cart, Shop\Cart::add). A bare name matches the last segment of every qualified
 // name. Names compare as PHP compares them: case-insensitively, but for the names of constants and class constants.
-// Declarations of the root, its vendor directory and the stubs are searched; those of the root and its vendor
-// directory come first, in the order of their files and lines.
+// Declarations of the root, its vendor directory and the stubs are searched; those of the root come first, then
+// those of its vendor directory, then those of the stubs, each in the order of their files and lines.
 func (ix *Index) Symbols(name string) ([]agentlsp.Symbol, error) {
 	q := strings.TrimPrefix(name, `\`)
 	i := strings.LastIndexAny(q, `\:`) + 1
@@ -601,15 +601,21 @@ type keyedSymbol struct {
 	key string
 }
 
-// symbols is the declarations in the root and the stubs that satisfy cond with arg, those of the root first.
+// symbols is the declarations in the root and the stubs that satisfy cond with arg: those of the root, then those
+// of its vendor directory, then those of the stubs.
 func (ix *Index) symbols(cond, arg string) ([]keyedSymbol, error) {
 	rows, err := ix.db.Query(`SELECT f.root, f.path, d.key, d.kind, d.name, d.container, d.sl, d.sc, d.el, d.ec,
 		d.rsl, d.rsc, d.rel, d.rec, d.signature, d.doc FROM php1_decls d
 		JOIN php1_facts x ON x.id = d.facts JOIN php1_files f ON f.hash = x.hash
-		WHERE `+cond+` AND x.salt = ? AND f.root IN (?, ?) ORDER BY f.root = ?, f.path, d.sl, d.sc`,
-		arg, ix.salt, ix.root, ix.stubs, ix.stubs)
-	return ix.scanSymbols(rows, err)
+		WHERE `+cond+` AND x.salt = ? AND f.root IN (?, ?) ORDER BY f.path, d.sl, d.sc`,
+		arg, ix.salt, ix.root, ix.stubs)
+	syms, err := ix.scanSymbols(rows, err)
+	slices.SortStableFunc(syms, func(a, b keyedSymbol) int { return originOrder[a.Origin] - originOrder[b.Origin] })
+	return syms, err
 }
+
+// originOrder is the place of an origin in an answer: the root, its vendor directory, the stubs.
+var originOrder = map[agentlsp.Origin]int{agentlsp.OriginVendor: 1, agentlsp.OriginStd: 2}
 
 func (ix *Index) scanSymbols(rows *sql.Rows, err error) ([]keyedSymbol, error) {
 	if err != nil {

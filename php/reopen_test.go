@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -93,6 +94,8 @@ func TestReopenAfterAChangeAnswersFromTheDisk(t *testing.T) {
 		log    string
 	}{
 		{"file changed", appendToApp, append([]place{{"src/app.php", "add('fresh')"}}, cartAddCalls...), indexed(4, 1)},
+		{"file changed, same size", putApple, append([]place{{"src/Shop/Checkout.php", "ADD('pear')"}}, appCartAddCalls...),
+			indexed(4, 1)},
 		{"file added", addShop, append([]place{{"src/shop.php", "add('added')"}}, cartAddCalls...), indexed(5, 1)},
 		{"file removed", removeCheckout, appCartAddCalls, indexed(3, 0)},
 	}
@@ -150,6 +153,16 @@ func appendToApp(t *testing.T, root string) {
 	require.NoError(t, err)
 	fresh := "\nfunction fresh(): void\n{\n    $basket = new Cart();\n    $basket->add('fresh');\n}\n"
 	require.NoError(t, os.WriteFile(app, append(src, fresh...), 0o600))
+}
+
+// putApple calls put in place of add: the file keeps its size and gets a new modification time.
+func putApple(t *testing.T, root string) {
+	t.Helper()
+	checkout := filepath.Join(root, "src", "Shop", "Checkout.php")
+	src, err := os.ReadFile(checkout)
+	require.NoError(t, err)
+	put := strings.Replace(string(src), "add('apple')", "put('apple')", 1)
+	require.NoError(t, os.WriteFile(checkout, []byte(put), 0o600))
 }
 
 func addShop(t *testing.T, root string) {

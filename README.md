@@ -142,7 +142,8 @@ one the top of the git checkout — is left to the program, as the module root o
   above (also through the fallback) and the resolved method calls. `Implementations` and `Unresolved` are empty.
 - `Symbols` takes a bare name (`Cart`, `add`), a name in its class (`Cart::add`) or in its namespace (`Shop\Cart`,
   `\Shop\Cart::add`); a bare name matches the last segment of every qualified name. Names compare as PHP compares
-  them: case-insensitively but for constants. It searches the root, `vendor/` and the stubs; the root comes first.
+  them: case-insensitively but for constants. It searches the root, `vendor/` and the stubs (Go searches the code of
+  the root only); the declarations of the root come first, then those of `vendor/`, then those of the stubs.
 - `Outline` lists the declarations of a file of the root in the order of their ranges.
 - `Rename` is not supported.
 
@@ -200,7 +201,7 @@ The declarations of the standard library and the extensions of PHP are the JetBr
 [`php/stubs/STUBS.md`](php/stubs/STUBS.md) records their version and how to update them. They add about 8.8 MB to a
 program. They are parsed once for a cache, named by the hash of their content. A file of the stubs that an answer
 points to is written on first need to `agent-lsp/php-stubs/<hash>/` under the user's cache directory, so that the
-place can be opened.
+place can be opened; these files take up to about 8.6 MB for a version of the stubs.
 
 Timings of `Open` and `Definition` as new processes, 16 cores, Linux, on `laravel/laravel` with its `vendor/`
 directory (8215 `.php` files), median of three runs:
@@ -213,7 +214,8 @@ directory (8215 `.php` files), median of three runs:
 | first call in a second worktree (every file hashed, none parsed) | 0.74 s |
 | next call in the second worktree | 0.10 s |
 
-The cache file grows to 64 MB with two worktrees of the project, mostly declarations with their doc comments.
+The cache file grows to about 61 MB with `laravel/laravel`, its `vendor/` directory and the stubs, and by about 5 MB
+with each next root of the same files, such as a worktree; most of it is declarations with their doc comments.
 
 ### The PHP parser
 
@@ -221,6 +223,10 @@ PHP is parsed by a fork of `github.com/VKCOM/php-parser` that `go.mod` puts in p
 `replace` only in the main module, so a program that imports agent-lsp copies that `replace` line into its own
 `go.mod`; without it the program is built with the upstream parser, which loses a class named `Enum` and strings
 with the `b` prefix.
+
+The parser does not parse the syntax of PHP 8.3 and 8.4, such as typed class constants and property hooks. A file
+with it is indexed from the tree the parser recovers, and its syntax errors go to the diagnostic lines: the class
+that holds such syntax is not in the index, and its methods are indexed as functions.
 
 ## Development
 

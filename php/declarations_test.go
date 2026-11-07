@@ -208,8 +208,14 @@ func TestSymbols(t *testing.T) {
 		{`Util\CURRENCY`, []string{"const CURRENCY: root src/Shop/Util/functions.php:13:7 CURRENCY"}},
 		{`UTIL\CURRENCY`, []string{"const CURRENCY: root src/Shop/Util/functions.php:13:7 CURRENCY"}},
 		{"currency", nil},
-		{`Lib\Client`, []string{"class Client: vendor vendor/acme/lib/src/Client.php:5:7 Client"}},
-		{"Countable", []string{"interface Countable: std Core/Core_c.php:736:11 Countable"}},
+		{`Lib\Client`, []string{ // the root first, also from a directory that sorts after vendor
+			"class Client: root web/Client.php:5:7 Client",
+			"class Client: vendor vendor/acme/lib/src/Client.php:5:7 Client",
+		}},
+		{"Countable", []string{ // the stubs last
+			"interface Countable: root web/Client.php:9:11 Countable",
+			"interface Countable: std Core/Core_c.php:736:11 Countable",
+		}},
 		{"Contracts", nil},
 		{"Nowhere", nil},
 	}
