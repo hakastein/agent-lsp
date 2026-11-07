@@ -36,6 +36,7 @@ func upstream(t *testing.T) usesOf {
 		require.NoError(t, os.WriteFile(filepath.Join(src, name), data, 0o600))
 	}
 	require.NoError(t, os.CopyFS(filepath.Join(src, "php"), os.DirFS(".")))
+	require.NoError(t, os.CopyFS(filepath.Join(src, "internal", "position"), os.DirFS(filepath.Join("..", "internal", "position"))))
 	require.NoError(t, os.CopyFS(filepath.Join(src, "upstream"), os.DirFS(filepath.Join("testdata", "upstream"))))
 	bin := filepath.Join(t.TempDir(), "upstream")
 	for _, args := range [][]string{

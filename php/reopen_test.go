@@ -30,6 +30,15 @@ func TestReopenReusesTheIndex(t *testing.T) {
 	assert.NotContains(t, secondLog, built)
 }
 
+// Close may be called again; the second call does nothing.
+func TestCloseTwice(t *testing.T) {
+	cache(t)
+	ix, _ := open(t, newRoot(t, "methods"))
+	require.NoError(t, ix.Close())
+
+	assert.NoError(t, ix.Close())
+}
+
 func TestReopenAfterAChangeAnswersFromTheDisk(t *testing.T) {
 	tests := []struct {
 		name   string
