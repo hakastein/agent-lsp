@@ -3,6 +3,7 @@ package golang_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -177,6 +178,62 @@ func edit(t *testing.T, root, file, old, new string) {
 	require.NoError(t, err)
 	require.Equal(t, 1, strings.Count(string(src), old))
 	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(string(src), old, new, 1)), 0o600))
+}
+
+// renames is the edits that rename the identifiers of places to name.
+func renames(t *testing.T, root string, places []place, name string) []agentlsp.Edit {
+	t.Helper()
+	var out []agentlsp.Edit
+	for _, p := range places {
+		out = append(out, agentlsp.Edit{Location: p.location(t, root), NewText: name})
+	}
+	return out
+}
+
+// apply makes the edits in their files. The edits come in the order of files, lines and columns, so making them from
+// the last keeps the places of the earlier ones.
+func apply(t *testing.T, edits []agentlsp.Edit) {
+	t.Helper()
+	for i := len(edits) - 1; i >= 0; i-- {
+		e := edits[i]
+		src, err := os.ReadFile(e.File)
+		require.NoError(t, err)
+		text := string(src)
+		text = text[:offset(text, e.Line, e.Column)] + e.NewText + text[offset(text, e.EndLine, e.EndColumn):]
+		require.NoError(t, os.WriteFile(e.File, []byte(text), 0o600))
+	}
+}
+
+// offset is the offset of the 1-based line and column in bytes in text.
+func offset(text string, line, column int) int {
+	start := 0
+	for range line - 1 {
+		start += strings.Index(text[start:], "\n") + 1
+	}
+	return start + column - 1
+}
+
+// vet is the output of go vet ./... in root for each of linux, darwin and windows; "" for none. gocache is the build
+// cache of the go command: the user cache directory of the test is fresh.
+func vet(t *testing.T, root, gocache string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		cmd := exec.Command("go", "vet", "./...")
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0", "GOPROXY=off", "GOFLAGS=", "GOCACHE="+gocache)
+		text, _ := cmd.CombinedOutput()
+		out[goos] = string(text)
+	}
+	return out
+}
+
+// goEnv is the value of a variable of the go command.
+func goEnv(t *testing.T, name string) string {
+	t.Helper()
+	out, err := exec.Command("go", "env", name).Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
 }
 
 // problem is what err says is wrong with the position at: its text after "go: position <at>: ", all of it when it

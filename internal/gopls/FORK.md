@@ -44,14 +44,14 @@
 - `protocol/context.go`, `protocol/log.go`, `protocol/protocol.go`, `protocol/tsclient.go`, `protocol/tsserver.go`
   (JSON-RPC клиент и сервер);
 - в `golang` оставлены только `comment.go`, `definition.go`, `embeddirective.go`, `identifier.go`,
-  `implementation.go`, `linkname.go`, `origin.go`, `references.go`, `snapshot.go`, `util.go`: замыкание
-  `Definition`; остальные файлы пакета не копируются.
+  `implementation.go`, `linkname.go`, `origin.go`, `references.go`, `rename.go`, `rename_check.go`, `snapshot.go`,
+  `util.go`: замыкание `Definition`, `References`, `Implementation` и `Rename`; остальные файлы пакета не копируются.
 
 Новые файлы форка, с копиями кода из удалённых файлов без изменений:
 
 - `cache/fork_gob.go` — типы сериализации диагностик из `cache/analysis.go`;
-- `golang/fork_helpers.go` — `parsePackageNameDecl` (`rename.go`), `docLinkRegex`, `findDocLinkIndices`,
-  `isScheme`, `is` (`semtok.go`), `trimVersionSuffix` (`stub.go`), `cond` (`extract.go`);
+- `golang/fork_helpers.go` — `docLinkRegex`, `findDocLinkIndices`, `isScheme`, `is` (`semtok.go`), `trimVersionSuffix`
+  (`stub.go`), `cond` (`extract.go`);
 - `protocol/fork.go` — `UnmarshalJSON` и `NonNilSlice` из `protocol/protocol.go`;
 - `xtools/go/packages/fork.go` — `SetDepsErrors`: восстановленный из базы пакет получает ошибки зависимостей.
 
@@ -67,6 +67,10 @@
 - `cache/session.go`: представление создаётся без `modcacheState`: индекс кэша модулей для автодополнения
   (`modindex.Update`) строился бы в фоне каждого процесса, по разу на представление, разбирая файлы кэша модулей и
   записывая индекс в `<кэш пользователя>/goimports`; agent-lsp автодополнения не вызывает.
+- `golang/rename.go`: без `renameFuncSignature` и её вызова в `Rename` — смены сигнатуры функции переименованием
+  ключевого слова `func`: она вызывает `ChangeSignature` из `change_signature.go`, который тянет `refactor/inline` и
+  `golang.org/x/tools/imports`; без счётчика телеметрии `countRenamePackage`.
+- `golang/rename_check.go`: место конфликта в ошибке переименования — полный путь файла, а не `каталог/файл.go`.
 - `settings/settings.go`: `CounterPath` — свой тип `[]string` вместо `telemetry.CounterPath` (без телеметрии).
 - `util/bug/bug.go`: без счётчика телеметрии `BugReportCount`.
 - `xtools/typesinternal/classify_call.go`: `usedIdent` и `interfaceMethod` — свои тела вместо `go:linkname` на
