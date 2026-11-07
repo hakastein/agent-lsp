@@ -36,7 +36,9 @@ func upstream(t *testing.T) usesOf {
 		require.NoError(t, os.WriteFile(filepath.Join(src, name), data, 0o600))
 	}
 	require.NoError(t, os.CopyFS(filepath.Join(src, "php"), os.DirFS(".")))
-	require.NoError(t, os.CopyFS(filepath.Join(src, "internal", "position"), os.DirFS(filepath.Join("..", "internal", "position"))))
+	for _, pkg := range []string{"position", "cachedb"} {
+		require.NoError(t, os.CopyFS(filepath.Join(src, "internal", pkg), os.DirFS(filepath.Join("..", "internal", pkg))))
+	}
 	require.NoError(t, os.CopyFS(filepath.Join(src, "upstream"), os.DirFS(filepath.Join("testdata", "upstream"))))
 	// .exe: Windows starts a file only by an executable extension; elsewhere the name does not matter.
 	bin := filepath.Join(t.TempDir(), "upstream.exe")
@@ -63,8 +65,8 @@ func upstream(t *testing.T) usesOf {
 	}
 }
 
-// An index built with another parser holds the facts that parser extracted; the snapshot of files alone cannot tell.
-// Each build makes its own index whichever ran first, and answers by the facts of its own parser.
+// Facts extracted by another parser are of the same contents; the hashes of the files alone cannot tell. Each build
+// parses every file whichever ran first, and answers by the facts of its own parser.
 func TestIndexOfAnotherParserIsNotReused(t *testing.T) {
 	upstream := upstream(t)
 
@@ -84,8 +86,7 @@ func TestIndexOfAnotherParserIsNotReused(t *testing.T) {
 			got, log := tt.second(t, root, enumLabel)
 
 			assert.ElementsMatch(t, locations(t, root, tt.want), got)
-			assert.Contains(t, log, built)
-			assert.NotContains(t, log, reused)
+			assert.Contains(t, log, indexed(6, 6))
 		})
 	}
 }

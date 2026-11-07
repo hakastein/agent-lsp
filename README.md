@@ -18,7 +18,7 @@ import (
 	"github.com/hakastein/agent-lsp/golang"
 )
 
-ix, err := golang.Open(root, nil) // root holds go.mod or go.work; php.Open takes any directory
+ix, err := golang.Open(root, nil) // root holds go.mod or go.work; for php.Open, composer.json or .git
 if err != nil {
 	return err
 }
@@ -42,14 +42,16 @@ refs, err := ix.References(pos)           // refs.Uses, refs.Implementations, re
   its source), the `Signature` (the text without the body: the header of a function,
   `type T struct` of a struct or interface type, the first line of other declarations), the `Doc` comment as it
   stands in the file, comment markers included (its lines come right before `Range.Line`), and the `Origin`:
-  `""` for the root, `"std"` for the standard library, `"module"` for a dependency outside the root, `"vendor"` for
+  `""` for the root, `"std"` for the standard library (the stubs in PHP), `"module"` for a dependency outside the root, `"vendor"` for
   a vendor directory of the root. A question on a declaration answers that declaration.
 - A `Symbol` is a declaration with its `Name`, `Kind` and `Container` (the type of a method or a field; `""` at the
   top level). The kinds are constants shared by the languages: `agentlsp.KindFunc`, `KindMethod`, `KindType`,
-  `KindField`, `KindVar`, `KindConst`; a kind prints as `func`, `method`, `type`, `field`, `var`, `const`.
+  `KindField`, `KindVar`, `KindConst`, `KindClass`, `KindInterface`, `KindTrait`, `KindEnum`, `KindClassConst`; a
+  kind prints as `func`, `method`, `type`, `field`, `var`, `const`, `class`, `interface`, `trait`, `enum`,
+  `classconst`.
 - The name for `Symbols` is qualified with dots: `Func`, `Type.Method`, `pkg.Func`, `pkg.Type.Method`; the package
-  is its name or its path. A bare name matches the last segment of every qualified name. In PHP the form is
-  `Class::method`.
+  is its name or its path. A bare name matches the last segment of every qualified name. In PHP the segments are
+  joined with `\` and `::`: `Cart::add`, `Shop\Cart`, `\Shop\Cart::add`.
 
 - A position is an absolute path, a 1-based line and a 1-based column in bytes. Locations in answers use the same
   units, with an exclusive end.
@@ -138,55 +140,102 @@ first call, 0.49–0.74 s on the next ones. With two worktrees of the gopls modu
 
 ## PHP
 
-Package `php` indexes the `.php` files under the root. It answers `Definition` and `References` for methods;
-`Rename`, `Symbols` and `Outline` are not supported. A declaration of `Definition` holds the location of the method
-name, which is also its range; it has no signature or doc comment.
+Package `php` answers about the `.php` files of a root: a directory with `composer.json` or `.git` (a checkout or a
+worktree); `Open` does not look above it. Finding the root of a file — the nearest `composer.json` above it, without
+one the top of the git checkout — is left to the program, as the module root of Go is.
 
-- A method call is resolved when its receiver class is known from the code around it:
-  - `(new Cart())->add()` and `(new Cart())?->add()`, anywhere, also at the top level of a file;
-  - `$cart->add()` inside a function, method or closure body where every assignment to `$cart` in that body is
-    `new Cart(...)` of one class, the first of them comes before the call and nothing can bind `$cart` to another
-    value. An arrow function sees the variables of its parent; a closure sees those it imports with `use` by value.
-    Such a variable is known when, following the chain of arrow functions and `use` captures outward, it comes
-    from a function, method or closure body where it is known; a chain that reaches the top level of the file
-    gives an unknown variable.
-  - A variable at the top level of a file is never known, also inside an arrow function or a closure that takes it
-    from there. A superglobal (`$GLOBALS`, `$_SERVER`, `$_GET`, `$_POST`, `$_FILES`, `$_COOKIE`, `$_SESSION`,
-    `$_REQUEST`, `$_ENV`, case-sensitive) is never known in any scope.
-  - Any other write makes the variable unknown: another assignment, a compound assignment, `++`/`--`, a parameter,
-    `foreach` (also by reference), `list(...)` and `[...]` destructuring (also with keys), `catch`, `global`,
-    `static`, `unset`, a reference (`$y = &$x`, `use (&$x)`), and passing it as an argument (the parameter may be
-    by reference). A method call on the variable itself does not.
-  - Every variable of the body is unknown when the body has `$$name` or `${...}` (also in `global $$name`),
-    `extract`, `eval`, `include`, `include_once`, `require`, `require_once`, or `parse_str` or `mb_parse_str` with
-    one argument.
-  - `new self`, `new static`, `new parent`, an anonymous class and a dynamic class name give no receiver class.
-  - These rules are recorded in [ADR 0001](docs/adr/0001-workspace-index-on-disk.md) (in Russian).
-- `Definition` lists the method declared in that class. A call becomes a use only when that class declares the
-  method; a call that is not resolved this way is not a use, whatever its method name.
-- `References` from a call site or from the method declaration lists every resolved call site of the method in
-  `Uses`. `Implementations` and `Unresolved` are empty: there is no hierarchy, and calls whose receiver is unknown
-  are not collected.
-- Class and method names compare case-insensitively, as in PHP.
+- `Definition`, `Symbols` and `Outline` know classes, interfaces, traits, enums, functions, constants (`const` and
+  `define('NAME', …)` with a string literal), methods and class constants (also enum cases): kinds `class`,
+  `interface`, `trait`, `enum`, `func`, `const`, `method`, `classconst`. The container of a method or a class
+  constant is its class without the namespace. Properties are not indexed.
+- A name of a class, a function or a constant resolves by the namespace and the `use` statements of its file, as in
+  PHP: in `new`, `extends`, `implements`, trait `use`, `instanceof`, `catch`, static calls, class constants and
+  `::class`, types of parameters, returns and properties (also unions and intersections), attributes, function
+  calls, constants, and the names of `use` statements. An unqualified function or constant in a namespace that no
+  `use function` or `use const` imports falls back to the global one: `strlen()` in `namespace Shop` is
+  `Shop\strlen` when that is declared, `strlen` otherwise.
+- Declarations come from the root, its `vendor/` directory and the stubs of the standard library (below); `Origin`
+  is `""`, `"vendor"` or `"std"`. A declaration holds its range from its first attribute, modifier or keyword, its
+  signature (the text up to the body of a class-like or a function, the whole text of a method without a body, the
+  first line of a constant) and its doc comment `/** … */` when it ends right before the declaration.
+- `References` lists in `Uses` every place under the root, `vendor/` included, that names the symbol: the names
+  above (also through the fallback) and the resolved method calls. `Implementations` and `Unresolved` are empty.
+- `Symbols` takes a bare name (`Cart`, `add`), a name in its class (`Cart::add`) or in its namespace (`Shop\Cart`,
+  `\Shop\Cart::add`); a bare name matches the last segment of every qualified name. Names compare as PHP compares
+  them: case-insensitively but for constants. It searches the root, `vendor/` and the stubs (Go searches the code of
+  the root only); the declarations of the root come first, then those of `vendor/`, then those of the stubs.
+- `Outline` lists the declarations of a file of the root in the order of their ranges.
+- `Rename` is not supported.
 
-Nothing else is resolved: no inheritance, interfaces, traits, `$this`, `self`, `static`, parameters, properties,
-return types or PHPDoc.
+A method call is resolved when its receiver class is known from the code around it:
+
+- `(new Cart())->add()` and `(new Cart())?->add()`, anywhere, also at the top level of a file;
+- `$cart->add()` inside a function, method or closure body where every assignment to `$cart` in that body is
+  `new Cart(...)` of one class, the first of them comes before the call and nothing can bind `$cart` to another
+  value. An arrow function sees the variables of its parent; a closure sees those it imports with `use` by value.
+  Such a variable is known when, following the chain of arrow functions and `use` captures outward, it comes from a
+  function, method or closure body where it is known; a chain that reaches the top level of the file gives an
+  unknown variable.
+- A variable at the top level of a file is never known, also inside an arrow function or a closure that takes it
+  from there. A superglobal (`$GLOBALS`, `$_SERVER`, `$_GET`, `$_POST`, `$_FILES`, `$_COOKIE`, `$_SESSION`,
+  `$_REQUEST`, `$_ENV`, case-sensitive) is never known in any scope.
+- Any other write makes the variable unknown: another assignment, a compound assignment, `++`/`--`, a parameter,
+  `foreach` (also by reference), `list(...)` and `[...]` destructuring (also with keys), `catch`, `global`,
+  `static`, `unset`, a reference (`$y = &$x`, `use (&$x)`), and passing it as an argument (the parameter may be by
+  reference). A method call on the variable itself does not.
+- Every variable of the body is unknown when the body has `$$name` or `${...}` (also in `global $$name`),
+  `extract`, `eval`, `include`, `include_once`, `require`, `require_once`, or `parse_str` or `mb_parse_str` with one
+  argument.
+- `new self`, `new static`, `new parent`, an anonymous class and a dynamic class name give no receiver class.
+- The call names the method declared in that class only: there is no inheritance, interfaces, traits, `$this`,
+  `self`, `static`, parameters, properties, return types or PHPDoc yet.
+
+These rules are recorded in [ADR 0001](docs/adr/0001-workspace-index-on-disk.md) (in Russian).
 
 ### The index
 
-- `Open` builds the index of the root or reuses it, and answers come from the files as they were at `Open`. It
-  compares the files under the root (path and content hash of every `.php` file) with the ones the index was built
-  from: if they are the same, the index is used as it is; otherwise it is built again as a whole.
-- The index is one SQLite file per root under the user's cache directory (`os.UserCacheDir()`) in `agent-lsp/php/`.
-  It is not `agent-lsp/cache.sqlite`, the file Go keeps its cache in.
+- The facts of a file — its declarations and the places that name them — depend on its content only. They live in
+  the cache database of the user, `agent-lsp/cache.sqlite` under `os.UserCacheDir()`, the file the Go cache is in,
+  keyed by the sha256 of the content and by the build: the rules of the package and the PHP parser the binary is
+  linked with. Facts of another build are not read.
+- A root keeps only its map «path → content hash», with the size and modification time each file was hashed at.
+  `Open` walks the root: a file whose size and time are the same is not read; a changed one is hashed again; a
+  content whose facts the cache holds is not parsed. An edit is seen by the next call, which parses only the edited
+  file. A second worktree or copy of a project reads and hashes its files but parses none that the first had.
+- Answers come from the files as they were at `Open`.
+- Entries not used for 14 days are deleted along the way; damage of the cache file is handled as for Go (above).
 - Symbolic links to files and directories are followed, also outside the root; a file is named by its path through
   the link, and a directory already on the path from the root is not walked again. Only regular files are read.
 - Skipped on purpose, and only these: an entry that is not a regular file (a named pipe, a socket, a device), a
   directory already on the path from the root, and a broken symlink whose name does not end in `.php`. A symlink is
   broken only when its target is missing or its chain of links never ends. Any other entry that cannot be read makes
-  `Open` fail with the path and the OS error, also when a ready index exists: a directory that cannot be listed, an
-  entry that cannot be stat-ed (also a symlink whose target path runs through a regular file or a directory without
-  permission), a `.php` file that cannot be opened or read, a broken `.php` symlink.
+  `Open` fail with the path and the OS error: a directory that cannot be listed, an entry that cannot be stat-ed
+  (also a symlink whose target path runs through a regular file or a directory without permission), a `.php` file
+  that cannot be opened or read, a broken `.php` symlink.
+- The diagnostic lines say how many files of the stubs and of the root there are and how many were parsed.
+
+### The stubs
+
+The declarations of the standard library and the extensions of PHP are the JetBrains
+[phpstorm-stubs](https://github.com/JetBrains/phpstorm-stubs) (Apache-2.0), embedded in the binary from `php/stubs`;
+[`php/stubs/STUBS.md`](php/stubs/STUBS.md) records their version and how to update them. They add about 8.8 MB to a
+program. They are parsed once for a cache, named by the hash of their content. A file of the stubs that an answer
+points to is written on first need to `agent-lsp/php-stubs/<hash>/` under the user's cache directory, so that the
+place can be opened; these files take up to about 8.6 MB for a version of the stubs.
+
+Timings of `Open` and `Definition` as new processes, 16 cores, Linux, on `laravel/laravel` with its `vendor/`
+directory (8215 `.php` files), median of three runs:
+
+| Call | Time |
+|---|---|
+| first call, empty cache (the stubs and every file parsed) | 2.6 s |
+| next call | 0.10 s |
+| after an edit of one file (that file parsed) | 0.12 s |
+| first call in a second worktree (every file hashed, none parsed) | 0.74 s |
+| next call in the second worktree | 0.10 s |
+
+The cache file grows to about 61 MB with `laravel/laravel`, its `vendor/` directory and the stubs, and by about 5 MB
+with each next root of the same files, such as a worktree; most of it is declarations with their doc comments.
 
 ### The PHP parser
 
@@ -194,6 +243,10 @@ PHP is parsed by a fork of `github.com/VKCOM/php-parser` that `go.mod` puts in p
 `replace` only in the main module, so a program that imports agent-lsp copies that `replace` line into its own
 `go.mod`; without it the program is built with the upstream parser, which loses a class named `Enum` and strings
 with the `b` prefix.
+
+The parser does not parse the syntax of PHP 8.3 and 8.4, such as typed class constants and property hooks. A file
+with it is indexed from the tree the parser recovers, and its syntax errors go to the diagnostic lines: the class
+that holds such syntax is not in the index, and its methods are indexed as functions.
 
 ## Development
 
@@ -216,4 +269,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 [MIT](LICENSE). The fork of gopls in `internal/gopls` keeps the BSD-3 license of the Go Authors
-([`internal/gopls/LICENSE`](internal/gopls/LICENSE)).
+([`internal/gopls/LICENSE`](internal/gopls/LICENSE)). The phpstorm-stubs in `php/stubs` keep the Apache-2.0 license
+of JetBrains ([`php/stubs/LICENSE`](php/stubs/LICENSE)).

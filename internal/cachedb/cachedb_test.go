@@ -15,7 +15,8 @@ import (
 )
 
 const schema = `CREATE TABLE IF NOT EXISTS facts (key TEXT PRIMARY KEY, used INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, used INTEGER NOT NULL);`
+CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, used INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS parts (key TEXT PRIMARY KEY, fact TEXT NOT NULL REFERENCES facts (key) ON DELETE CASCADE);`
 
 // cache gives the rest of the test a fresh user cache directory.
 func cache(t *testing.T) {
@@ -25,7 +26,8 @@ func cache(t *testing.T) {
 	}
 }
 
-// Open sweeps every table with a "used" column: a row not used for 14 days goes, a younger one stays.
+// Open sweeps every table with a "used" column: a row not used for 14 days goes, a younger one stays. A row that
+// references a swept row with ON DELETE CASCADE goes with it.
 func TestOpenSweepsUnusedRows(t *testing.T) {
 	cache(t)
 	now := time.Now()
@@ -37,6 +39,10 @@ func TestOpenSweepsUnusedRows(t *testing.T) {
 			require.NoError(t, err)
 		}
 	}
+	for _, fact := range []string{"used 15 days ago", "used 13 days ago"} {
+		_, err := db.Exec(`INSERT INTO parts (key, fact) VALUES (?, ?)`, "part of the fact "+fact, fact)
+		require.NoError(t, err)
+	}
 	_, err = db.Exec(`UPDATE meta SET value = '0' WHERE key = 'swept'`) // the last sweep was long ago
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
@@ -45,9 +51,16 @@ func TestOpenSweepsUnusedRows(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	for _, table := range []string{"facts", "notes"} {
-		t.Run(table, func(t *testing.T) {
-			assert.Equal(t, []string{"used 13 days ago"}, keys(t, db, table))
+	for _, tt := range []struct {
+		table string
+		want  []string
+	}{
+		{"facts", []string{"used 13 days ago"}},
+		{"notes", []string{"used 13 days ago"}},
+		{"parts", []string{"part of the fact used 13 days ago"}},
+	} {
+		t.Run(tt.table, func(t *testing.T) {
+			assert.Equal(t, tt.want, keys(t, db, tt.table))
 		})
 	}
 }

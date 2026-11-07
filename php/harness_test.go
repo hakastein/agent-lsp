@@ -68,17 +68,19 @@ func open(t *testing.T, root string) (*php.Index, string) {
 	return ix, log
 }
 
-// Whether Open built the index or reused it is seen only through its diagnostic lines; these tests are their only
-// reader.
-const (
-	built  = "php: index built: "
-	reused = "php: index reused: "
-)
+// How many files of the root Open found and how many it parsed is seen only through its diagnostic lines; these
+// tests are their only reader.
+const rootLine = "php: root: "
+
+// indexed is the diagnostic line of Open that found files .php files under the root and parsed parsed of them.
+func indexed(files, parsed int) string {
+	return fmt.Sprintf("%s%d files, %d parsed\n", rootLine, files, parsed)
+}
 
 // place is where a needle stands in a file under the root.
 type place struct {
 	file   string // relative to the root
-	needle string // unique in the file; the place is the identifier it starts with
+	needle string // unique in the file; the place is the identifier, also qualified, it starts with
 }
 
 // location is the location of p's identifier.
@@ -91,7 +93,7 @@ func (p place) location(t *testing.T, root string) agentlsp.Location {
 	require.Equal(t, 1, strings.Count(text, p.needle), "needle %q in %s", p.needle, p.file)
 	at := strings.Index(text, p.needle)
 	word := len(p.needle) - len(strings.TrimLeft(p.needle,
-		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"))
+		`abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_\`))
 	line := strings.Count(text[:at], "\n") + 1
 	column := at - strings.LastIndex(text[:at], "\n")
 	return agentlsp.Location{File: path, Line: line, Column: column, EndLine: line, EndColumn: column + word}
@@ -112,15 +114,13 @@ func locations(t *testing.T, root string, places []place) []agentlsp.Location {
 	return out
 }
 
-// definition is the names of the declarations Definition(at) answers; the test fails when a declaration has more
-// than its name.
+// definition is the names of the declarations Definition(at) answers.
 func definition(t *testing.T, ix *php.Index, root string, at place) []agentlsp.Location {
 	t.Helper()
 	found, err := ix.Definition(at.position(t, root))
 	require.NoError(t, err)
 	var names []agentlsp.Location
 	for _, d := range found {
-		require.Equal(t, agentlsp.Declaration{Location: d.Location, Range: d.Location}, d)
 		names = append(names, d.Location)
 	}
 	return names
@@ -139,9 +139,14 @@ func uses(t *testing.T, ix *php.Index, root string, at place) []agentlsp.Locatio
 // problem is what err says is wrong with the position at: its text after "php: position <at>: ", all of it when it
 // does not start so, and "" for no error.
 func problem(at agentlsp.Position, err error) string {
+	return after(err, fmt.Sprintf("php: position %s:%d:%d: ", at.File, at.Line, at.Column))
+}
+
+// after is the text of err after prefix, all of it when it does not start so, and "" for no error.
+func after(err error, prefix string) string {
 	if err == nil {
 		return ""
 	}
-	text, _ := strings.CutPrefix(err.Error(), fmt.Sprintf("php: position %s:%d:%d: ", at.File, at.Line, at.Column))
+	text, _ := strings.CutPrefix(err.Error(), prefix)
 	return text
 }
