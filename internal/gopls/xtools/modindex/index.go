@@ -111,11 +111,7 @@ var IndexDir string = func() string {
 			dir = os.TempDir()
 		}
 	}
-	dir = filepath.Join(dir, "goimports")
-	if err := os.MkdirAll(dir, 0777); err != nil {
-		dir = "" // #75505, people complain about the error message
-	}
-	return dir
+	return filepath.Join(dir, "goimports")
 }()
 
 // Read reads the latest version of the on-disk index
@@ -234,6 +230,9 @@ func readIndexFrom(gomodcache string, r io.Reader) (*Index, error) {
 func write(gomodcache string, ix *Index) error {
 	if IndexDir == "" {
 		return os.ErrNotExist
+	}
+	if err := os.MkdirAll(IndexDir, 0777); err != nil {
+		return err
 	}
 	// Write the index into a payload file with a fresh name.
 	f, err := os.CreateTemp(IndexDir, fmt.Sprintf("index-%d-*", CurrentVersion))

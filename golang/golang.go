@@ -6,11 +6,14 @@
 package golang
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"maps"
 	"os"
 	"path/filepath"
@@ -27,6 +30,7 @@ import (
 	"github.com/hakastein/agent-lsp/internal/gopls/protocol"
 	"github.com/hakastein/agent-lsp/internal/gopls/settings"
 	"github.com/hakastein/agent-lsp/internal/position"
+	"golang.org/x/sync/errgroup"
 )
 
 // forkVersion names the gopls the fork is taken from and the revision of the fork's changes; see
@@ -43,19 +47,34 @@ const blobsTable = "go1_blobs"
 // open guards the one Go index a process may have open: the gopls cache is global to the process.
 var open sync.Mutex
 
+// platforms are the GOOS the packages of a root are loaded for, each in a view of its own: a file built for any of
+// them is answered about, and References joins their answers.
+var platforms = []string{"linux", "darwin", "windows"}
+
 // Index answers questions about the Go code of one root.
 type Index struct {
-	root    string
-	env     cache.GoEnv
-	logf    func(string, ...any)
-	session *cache.Session
-	view    *cache.Snapshot // the gopls view of the root as Open loaded it
-	release func()
-	db      *cachedb.DB
+	root  string
+	env   cache.GoEnv
+	logf  func(string, ...any)
+	views []view // one per platform, in their order; nil once closed
+	db    *cachedb.DB
 }
 
-// Open opens the Go code of root, a directory with a go.mod or a go.work file, and loads its packages: the stored
-// list of packages when the files it depends on are the same, the go command otherwise. A process has one Go index
+// view is the gopls view of the root for one GOOS: its session and its snapshot as Open loaded it.
+type view struct {
+	session  *cache.Session
+	snapshot *cache.Snapshot
+	release  func()
+}
+
+func (v view) close() {
+	v.release()
+	v.session.Shutdown(context.Background())
+}
+
+// Open opens the Go code of root, a directory with a go.mod or a go.work file, and loads its packages for each of
+// linux, darwin and windows, whatever GOOS the environment sets: the stored list of packages when the files it depends
+// on are the same, the go command otherwise. A process has one Go index
 // open at a time; Open fails while another is. logf, if not nil, receives diagnostic lines; they are not a contract.
 func Open(root string, logf func(format string, args ...any)) (*Index, error) {
 	if logf == nil {
@@ -94,72 +113,133 @@ func openIndex(root string, logf func(string, ...any)) (_ *Index, err error) {
 	}
 	ctx := context.Background()
 	dir := protocol.URIFromPath(root)
-	opts := settings.DefaultOptions()
-	env, err := cache.FetchGoEnv(ctx, dir, opts)
+	env, err := cache.FetchGoEnv(ctx, dir, settings.DefaultOptions())
 	if err != nil {
 		return nil, fmt.Errorf("go: %w", err)
 	}
-	l := &loader{db: db, env: *env, logf: logf}
-	session := cache.NewSession(ctx, cache.New(nil))
-	_, view, release, err := session.NewView(ctx, &cache.Folder{
-		Dir: dir, Name: filepath.Base(root), Options: opts, Env: *env, Load: l.load,
-	})
-	if err != nil {
-		session.Shutdown(ctx)
-		return nil, fmt.Errorf("go: %w", err)
+	var views []view
+	defer func() {
+		if err != nil {
+			for _, v := range views {
+				v.close()
+			}
+		}
+	}()
+	shared := cache.New(nil) // what the views have in common, such as the files they read
+	var loaders []*loader
+	for _, goos := range platforms {
+		opts := settings.DefaultOptions()
+		opts.Env = map[string]string{"GOOS": goos} // the go commands of the view
+		goEnv := *env
+		goEnv.GOOS = goos // no other field of GoEnv depends on GOOS
+		l := &loader{db: db, env: goEnv, logf: logf}
+		session := cache.NewSession(ctx, shared)
+		_, snapshot, release, err := session.NewView(ctx, &cache.Folder{
+			Dir: dir, Name: filepath.Base(root), Options: opts, Env: goEnv, Load: l.load,
+		})
+		if err != nil {
+			session.Shutdown(ctx)
+			return nil, fmt.Errorf("go: %s: %w", goos, err)
+		}
+		views = append(views, view{session: session, snapshot: snapshot, release: release})
+		loaders = append(loaders, l)
 	}
-	view.AwaitInitialized(ctx)
-	if e := view.InitializationError(); e != nil {
-		release()
-		session.Shutdown(ctx)
-		return nil, fmt.Errorf("go: %w", e.MainError)
+	loaded, reused := 0, 0
+	for i, v := range views { // the views load at once, each in the background
+		v.snapshot.AwaitInitialized(ctx)
+		if e := v.snapshot.InitializationError(); e != nil {
+			return nil, fmt.Errorf("go: %s: %w", platforms[i], e.MainError)
+		}
+		loaded, reused = loaded+loaders[i].loaded, reused+loaders[i].reused
 	}
-	if l.loaded > 0 {
-		logf("go: packages loaded: %d", l.loaded)
+	if loaded > 0 {
+		logf("go: packages loaded: %d", loaded)
 	} else {
-		logf("go: packages reused: %d", l.reused)
+		logf("go: packages reused: %d", reused)
 	}
-	return &Index{root: root, env: *env, logf: logf, session: session, view: view, release: release,
-		db: db}, nil
+	return &Index{root: root, env: *env, logf: logf, views: views, db: db}, nil
 }
 
 // Close writes what the gopls cache computed to the cache database and closes it. A second Close does nothing.
 func (ix *Index) Close() error {
-	if ix.session == nil {
+	if ix.views == nil {
 		return nil
 	}
 	defer open.Unlock()
-	ix.release()
-	ix.session.Shutdown(context.Background())
-	ix.session = nil
+	for _, v := range ix.views {
+		v.close()
+	}
+	ix.views = nil
 	hits, misses := filecache.Stats()
 	written, err := filecache.Flush()
 	ix.logf("go: cache: %d reused, %d missed, %d written", hits, misses, written)
 	return errors.Join(ix.db.Err(err), ix.db.Close())
 }
 
-// Definition is the declarations of the symbol at pos, which may be in the standard library or a dependency. On a
-// declaration, it is that declaration. A place in a file of the root where no symbol is has none. A position that is
-// not a place in a file of the root is an error that repeats pos and names the problem, as in every language.
-func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Declaration, error) {
+// question is a position in the terms of gopls: the file, the place in it, and the snapshots of the views whose
+// packages hold the file, in the order of platforms.
+type question struct {
+	uri   protocol.DocumentURI
+	at    protocol.Range
+	views []*cache.Snapshot
+}
+
+// ask checks pos, as every language does, and finds the platforms that build its file. A file that is not a .go file
+// gives no views: no symbol is there. A .go file no platform builds is an error.
+func (ix *Index) ask(ctx context.Context, pos agentlsp.Position) (question, error) {
 	src, err := position.Check(ix.root, pos)
 	if err != nil {
-		return nil, fmt.Errorf("go: position %s:%d:%d: %w", pos.File, pos.Line, pos.Column, err)
+		return question{}, fmt.Errorf("go: position %s:%d:%d: %w", pos.File, pos.Line, pos.Column, err)
 	}
 	if !strings.HasSuffix(pos.File, ".go") {
-		return nil, nil
+		return question{}, nil
 	}
+	q := question{uri: protocol.URIFromPath(pos.File)}
+	at, err := protocol.NewMapper(q.uri, src).OffsetPosition(position.Offset(src, pos))
+	if err != nil {
+		return question{}, fmt.Errorf("go: %w", err)
+	}
+	q.at = protocol.Range{Start: at, End: at}
+	if q.views, err = ix.building(ctx, q.uri); err != nil {
+		return question{}, fmt.Errorf("go: %w", err)
+	}
+	if q.views == nil {
+		return question{}, fmt.Errorf("go: %s is in no package for %s", pos.File, strings.Join(platforms, ", "))
+	}
+	return q, nil
+}
+
+// building is the snapshots of the views whose packages hold the file at uri, in the order of platforms: the
+// platforms that build the file.
+func (ix *Index) building(ctx context.Context, uri protocol.DocumentURI) ([]*cache.Snapshot, error) {
+	var out []*cache.Snapshot
+	for _, v := range ix.views {
+		mps, err := v.snapshot.MetadataForFile(ctx, uri, true)
+		if err != nil {
+			return nil, err
+		}
+		if len(mps) > 0 {
+			out = append(out, v.snapshot)
+		}
+	}
+	return out, nil
+}
+
+// Definition is the declarations of the symbol at pos, which may be in the standard library or a dependency. On a
+// declaration, it is that declaration. A place in a file of the root where no symbol is has none. A position that is
+// not a place in a file of the root is an error that repeats pos and names the problem, as in every language. The
+// answer is that of the first platform that builds the file; a .go file no platform builds is an error.
+func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Declaration, error) {
 	ctx := context.Background()
-	uri := protocol.URIFromPath(pos.File)
-	fh, err := ix.view.ReadFile(ctx, uri)
+	q, err := ix.ask(ctx, pos)
+	if err != nil || q.views == nil {
+		return nil, err
+	}
+	fh, err := q.views[0].ReadFile(ctx, q.uri)
 	if err != nil {
 		return nil, fmt.Errorf("go: %w", err)
 	}
-	at, err := protocol.NewMapper(uri, src).OffsetPosition(position.Offset(src, pos))
-	if err != nil {
-		return nil, fmt.Errorf("go: %w", err)
-	}
-	locs, err := gopls.Definition(ctx, ix.view, fh, protocol.Range{Start: at, End: at})
+	locs, err := gopls.Definition(ctx, q.views[0], fh, q.at)
 	if err != nil {
 		return nil, fmt.Errorf("go: definition at %s:%d:%d: %w", pos.File, pos.Line, pos.Column, err)
 	}
@@ -199,28 +279,30 @@ func (ix *Index) declarationAt(loc protocol.Location) (agentlsp.Declaration, err
 
 // Symbols is the declarations of the packages of the root with the name: a bare name (Symbols), a name in its type
 // (Snapshot.Symbols), a name in its package (cache.New, cache.Snapshot.Symbols); a package is named by its name or
-// its path. A bare name matches the last segment of every qualified name. Declarations come in the order of their
-// files and lines.
+// its path. A bare name matches the last segment of every qualified name. The packages are those of every platform.
+// Declarations come in the order of their files and lines.
 func (ix *Index) Symbols(name string) ([]agentlsp.Symbol, error) {
 	ctx := context.Background()
 	last := name[strings.LastIndex(name, ".")+1:]
-	var ids []cache.PackageID
-	for id := range ix.view.WorkspacePackages().All() {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	index, err := ix.view.Symbols(ctx, ids...)
-	if err != nil {
-		return nil, fmt.Errorf("go: symbols: %w", err)
-	}
 	type candidate struct{ pkgName, pkgPath string }
 	files := map[string]candidate{}
-	for i, pkg := range index {
-		mp := ix.view.Metadata(ids[i])
-		for j, syms := range pkg.Symbols {
-			for _, sym := range syms {
-				if sym.Name[strings.LastIndex(sym.Name, ".")+1:] == last {
-					files[pkg.Files[j].Path()] = candidate{string(mp.Name), string(mp.PkgPath)}
+	for _, v := range ix.views {
+		var ids []cache.PackageID
+		for id := range v.snapshot.WorkspacePackages().All() {
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		index, err := v.snapshot.Symbols(ctx, ids...)
+		if err != nil {
+			return nil, fmt.Errorf("go: symbols: %w", err)
+		}
+		for i, pkg := range index {
+			mp := v.snapshot.Metadata(ids[i])
+			for j, syms := range pkg.Symbols {
+				for _, sym := range syms {
+					if sym.Name[strings.LastIndex(sym.Name, ".")+1:] == last {
+						files[pkg.Files[j].Path()] = candidate{string(mp.Name), string(mp.PkgPath)}
+					}
 				}
 			}
 		}
@@ -269,9 +351,156 @@ func (ix *Index) Outline(file string) ([]agentlsp.Symbol, error) {
 	return syms, nil
 }
 
-// References is not supported.
+// References is the uses of the symbol at pos in the packages of the root and, for an interface type or a method of
+// one, the types and methods that implement it, joined over the platforms: a platform that builds the file of pos is
+// asked at pos, another one at the declaration of the symbol, if it builds that. A place seen under more than one
+// platform is in the answer once. Locations come in the order of files, lines and columns. The declaration itself is
+// not a use. Unresolved is empty: gopls resolves every identifier of the packages by types. Its answer to a place
+// where no symbol is and its errors on a position are those of Definition.
 func (ix *Index) References(pos agentlsp.Position) (agentlsp.References, error) {
-	return agentlsp.References{}, fmt.Errorf("go: references: %w", agentlsp.ErrNotSupported)
+	ctx := context.Background()
+	q, err := ix.ask(ctx, pos)
+	if err != nil || q.views == nil {
+		return agentlsp.References{}, err
+	}
+	uses, impls, err := ix.references(ctx, q)
+	if errors.Is(err, gopls.ErrNoIdentFound) {
+		return agentlsp.References{}, nil
+	}
+	if err != nil {
+		return agentlsp.References{}, fmt.Errorf("go: references at %s:%d:%d: %w", pos.File, pos.Line, pos.Column, err)
+	}
+	var refs agentlsp.References
+	if refs.Uses, err = locations(uses); err != nil {
+		return agentlsp.References{}, fmt.Errorf("go: %w", err)
+	}
+	if refs.Implementations, err = locations(impls); err != nil {
+		return agentlsp.References{}, fmt.Errorf("go: %w", err)
+	}
+	return refs, nil
+}
+
+// references is what the views find for the question, as gopls gives it: the uses and the implementations. A view
+// that builds the file of the question is asked there, another one at the declaration of the symbol, if it builds
+// that; the views are asked at once.
+func (ix *Index) references(ctx context.Context, q question) (uses, impls []protocol.Location, err error) {
+	type target struct {
+		snapshot *cache.Snapshot
+		uri      protocol.DocumentURI
+		at       protocol.Range
+	}
+	var targets []target
+	for _, snapshot := range q.views {
+		targets = append(targets, target{snapshot, q.uri, q.at})
+	}
+	if len(q.views) < len(ix.views) {
+		fh, err := q.views[0].ReadFile(ctx, q.uri)
+		if err != nil {
+			return nil, nil, err
+		}
+		decls, err := gopls.Definition(ctx, q.views[0], fh, q.at)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, decl := range decls {
+			views, err := ix.building(ctx, decl.URI)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, snapshot := range views {
+				if !slices.Contains(q.views, snapshot) {
+					targets = append(targets, target{snapshot, decl.URI, protocol.Range{Start: decl.Range.Start, End: decl.Range.Start}})
+				}
+			}
+		}
+	}
+	var mu sync.Mutex
+	var g errgroup.Group
+	for _, t := range targets {
+		g.Go(func() error {
+			fh, err := t.snapshot.ReadFile(ctx, t.uri)
+			if err != nil {
+				return err
+			}
+			found, err := gopls.References(ctx, t.snapshot, fh, t.at, false)
+			if err != nil {
+				return err
+			}
+			abstract, err := isInterface(ctx, t.snapshot, t.uri, t.at)
+			if err != nil {
+				return err
+			}
+			var implemented []protocol.Location
+			if abstract {
+				if implemented, err = gopls.Implementation(ctx, t.snapshot, fh, t.at); err != nil {
+					return err
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			uses, impls = append(uses, found...), append(impls, implemented...)
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+	return uses, impls, nil
+}
+
+// isInterface reports whether the identifier at the place names an interface type or a method of one. gopls finds
+// the implementations of those; for a concrete type or method it finds the interfaces they implement instead.
+func isInterface(ctx context.Context, snapshot *cache.Snapshot, uri protocol.DocumentURI, at protocol.Range) (bool, error) {
+	pkg, pgf, err := gopls.NarrowestPackageForFile(ctx, snapshot, uri)
+	if err != nil {
+		return false, err
+	}
+	start, end, err := pgf.RangePos(at)
+	if err != nil {
+		return false, err
+	}
+	cur, _ := pgf.Cursor().FindByPos(start, end)
+	id, ok := cur.Node().(*ast.Ident)
+	if !ok {
+		return false, nil
+	}
+	switch obj := pkg.TypesInfo().ObjectOf(id).(type) {
+	case *types.TypeName:
+		return types.IsInterface(obj.Type()), nil
+	case *types.Func:
+		recv := obj.Signature().Recv()
+		return recv != nil && types.IsInterface(recv.Type()), nil
+	}
+	return false, nil
+}
+
+// locations is the places gopls found as locations, each once, in the order of files, lines and columns.
+func locations(locs []protocol.Location) ([]agentlsp.Location, error) {
+	mappers := map[protocol.DocumentURI]*protocol.Mapper{}
+	var out []agentlsp.Location
+	for _, loc := range locs {
+		m := mappers[loc.URI]
+		if m == nil {
+			src, err := os.ReadFile(loc.URI.Path())
+			if err != nil {
+				return nil, err
+			}
+			m = protocol.NewMapper(loc.URI, src)
+			mappers[loc.URI] = m
+		}
+		start, end, err := m.RangeOffsets(loc.Range)
+		if err != nil {
+			return nil, err
+		}
+		l := agentlsp.Location{File: loc.URI.Path()}
+		l.Line, l.Column = m.OffsetLineCol8(start)
+		l.EndLine, l.EndColumn = m.OffsetLineCol8(end)
+		out = append(out, l)
+	}
+	slices.SortFunc(out, func(a, b agentlsp.Location) int {
+		return cmp.Or(strings.Compare(a.File, b.File), cmp.Compare(a.Line, b.Line), cmp.Compare(a.Column, b.Column))
+	})
+	return slices.Compact(out), nil
 }
 
 // Rename is not supported.

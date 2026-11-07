@@ -40,7 +40,8 @@ func upstream(t *testing.T) usesOf {
 		require.NoError(t, os.CopyFS(filepath.Join(src, "internal", pkg), os.DirFS(filepath.Join("..", "internal", pkg))))
 	}
 	require.NoError(t, os.CopyFS(filepath.Join(src, "upstream"), os.DirFS(filepath.Join("testdata", "upstream"))))
-	bin := filepath.Join(t.TempDir(), "upstream")
+	// .exe: Windows starts a file only by an executable extension; elsewhere the name does not matter.
+	bin := filepath.Join(t.TempDir(), "upstream.exe")
 	for _, args := range [][]string{
 		{"mod", "edit", "-dropreplace=github.com/VKCOM/php-parser"},
 		{"build", "-mod=mod", "-o", bin, "./upstream"},

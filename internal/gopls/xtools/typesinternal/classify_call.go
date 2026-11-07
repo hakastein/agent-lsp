@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
-	_ "unsafe" // for go:linkname hack
 )
 
 // CallKind describes the function position of an [*ast.CallExpr].
@@ -130,8 +129,36 @@ func UsedIdent(info *types.Info, e ast.Expr) *ast.Ident {
 	return usedIdent(info, e)
 }
 
-//go:linkname usedIdent golang.org/x/tools/go/types/typeutil.usedIdent
-func usedIdent(info *types.Info, e ast.Expr) *ast.Ident
+// usedIdent and interfaceMethod are the bodies of the functions of golang.org/x/tools/go/types/typeutil that
+// upstream reaches by go:linkname, from its callee.go at x/tools a299dadba899; typeutil of x/tools v0.52.0, which
+// agent-lsp builds with, has neither.
+func usedIdent(info *types.Info, e ast.Expr) *ast.Ident {
+	if info.Types == nil || info.Uses == nil {
+		panic("one of info.Types or info.Uses is nil; both must be populated")
+	}
+	// Look through type instantiation if necessary.
+	switch d := ast.Unparen(e).(type) {
+	case *ast.IndexExpr:
+		if info.Types[d.Index].IsType() {
+			e = d.X
+		}
+	case *ast.IndexListExpr:
+		e = d.X
+	}
 
-//go:linkname interfaceMethod golang.org/x/tools/go/types/typeutil.interfaceMethod
-func interfaceMethod(f *types.Func) bool
+	switch e := ast.Unparen(e).(type) {
+	// info.Uses always has the object we want, even for selector expressions.
+	// We don't need info.Selections.
+	// See go/types/recording.go:recordSelection.
+	case *ast.Ident:
+		return e
+	case *ast.SelectorExpr:
+		return e.Sel
+	}
+	return nil
+}
+
+func interfaceMethod(f *types.Func) bool {
+	recv := f.Signature().Recv()
+	return recv != nil && types.IsInterface(recv.Type())
+}
