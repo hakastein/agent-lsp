@@ -64,8 +64,17 @@
   `go env -w`, `FetchGoEnv` спрашивает его тем же вызовом `go env`.
 - `cache/load.go`: `Snapshot.load` вызывает `Folder.Load`, если оно задано.
 - `cache/errors.go`: удалена `toSourceDiagnostic` (нужна только `cache/analysis.go`).
+- `cache/session.go`: представление создаётся без `modcacheState`: индекс кэша модулей для автодополнения
+  (`modindex.Update`) строился бы в фоне каждого процесса, по разу на представление, разбирая файлы кэша модулей и
+  записывая индекс в `<кэш пользователя>/goimports`; agent-lsp автодополнения не вызывает.
 - `settings/settings.go`: `CounterPath` — свой тип `[]string` вместо `telemetry.CounterPath` (без телеметрии).
 - `util/bug/bug.go`: без счётчика телеметрии `BugReportCount`.
+- `xtools/typesinternal/classify_call.go`: `usedIdent` и `interfaceMethod` — свои тела вместо `go:linkname` на
+  `golang.org/x/tools/go/types/typeutil`: в x/tools v0.52.0 (зависимость `go.mod`) этих функций нет; тела взяты из
+  `go/types/typeutil/callee.go` x/tools `a299dadba899`. Без правки бинарник, вызывающий `golang.Implementation`, не
+  собирается.
+- `xtools/modindex/index.go`: каталог индекса `IndexDir` создаёт `write` перед записью индекса, а не инициализация
+  пакета: процесс, который индекс не пишет, не создаёт `<кэш пользователя>/goimports`.
 
 ## Как подтянуть upstream
 

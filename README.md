@@ -70,13 +70,27 @@ refs, err := ix.References(pos)           // refs.Uses, refs.Implementations, re
 Package `golang` answers about the Go code of a root: a directory with `go.mod` or `go.work`. It calls a fork of the
 internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.md`](internal/gopls/FORK.md)).
 
+- The packages of the root are loaded for each of `linux`, `darwin` and `windows`, whatever `GOOS` the environment
+  sets (`GOARCH` is the one of the environment), so a file built for one of them only, such as `x_windows.go`, is
+  answered about. A `.go` file none of them builds (another `GOOS`, a build tag) is an error of `Definition` and
+  `References`.
 - `Definition` resolves by types, also into the standard library and dependencies; locals, parameters, fields,
-  interface methods and labels are declarations too.
-- `Symbols` searches the packages of the root, test files included; dependencies are not searched. It gives all
-  six kinds.
+  interface methods and labels are declarations too. It answers as the first of the three platforms that builds
+  the file.
+- `Symbols` searches the packages of the root for all three platforms, test files included; dependencies are not
+  searched. It gives all six kinds.
 - `Outline` lists the declarations of a file in order: functions, methods, types, the fields of struct types and the
   methods of interface types, top-level variables and constants. It reads the syntax of the file only.
-- `References` and `Rename` are not supported.
+- `References` gives the uses of the symbol in the packages of the root and, in `Implementations`, the types and
+  methods that implement an interface type or a method of one; for a concrete type or method that list is empty. The
+  declaration itself is not a use, and a question on a use and on the declaration gets the same answer. The answers
+  of the three platforms are joined: a platform that builds the file of the question is asked there, another one at
+  the declaration of the symbol; a place more than one of them sees is in the answer once. Locations come in the
+  order of files, lines and columns. `Unresolved` is empty: every identifier is resolved by types.
+- A symbol declared for each platform apart (`f` in `f_unix.go` and in `f_windows.go`) is a symbol of each: a
+  question in a file all three build finds the uses of every one, a question on one of the declarations the uses of
+  that one.
+- `Rename` is not supported.
 - A process has one Go index open at a time: `Open` fails until the open one is closed.
 
 ### The cache
@@ -85,8 +99,9 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
   reports for the root live in one SQLite file under the user's cache directory: `agent-lsp/cache.sqlite`. Every
   call is a new process, so a call reuses what an earlier one computed.
 - The packages of the root are listed again only when `go.mod`, `go.sum`, `go.work`, the set of `.go` files, or the
-  package name, imports or build constraints of a file change, or the toolchain, `GOOS`, `GOARCH`, build flags or
-  the settings of `go env -w` differ. An edit of a function body is seen by the next call without listing again.
+  package name, imports or build constraints of a file change, or the toolchain, `GOARCH`, build flags or
+  the settings of `go env -w` differ; each platform has a load of its own. An edit of a function body is seen by the
+  next call without listing again.
 - Keys hold the schema, the fork and the Go version the binary is built with: entries of another build are not read.
 - Two worktrees of one module share the entries of the standard library and the module cache; each computes the
   packages of its own files once, since gopls keys and export data hold file paths.
@@ -102,19 +117,24 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
 - The diagnostic lines say whether the packages were loaded or reused and how many cache entries were reused,
   missed and written.
 
-Timings of `Open`, `Definition` and `Close` as new processes, 16 cores, Linux, a warm Go build cache, on
-`golang.org/x/tools` v0.47.0:
+Timings of a new process (`Open`, one call, `Close`), wall clock, 16 cores, Linux, a warm Go build cache, other
+processes keeping the load average at 8–11, on `golang.org/x/tools` v0.47.0. In the module `golang.org/x/tools`
+`Definition` is asked at the call of `goListDriver` in `go/packages/packages.go`, `References` at the declaration of
+`Load` there (146 uses); in the module `golang.org/x/tools/gopls` both are asked at the call of
+`NarrowestPackageForFile` in `internal/golang/definition.go` (32 uses).
 
-| Call | Module `golang.org/x/tools` (`go/packages/packages.go` → `goListDriver`) | Module `golang.org/x/tools/gopls` (`internal/golang/definition.go` → `NarrowestPackageForFile`) |
-|---|---|---|
-| first call, empty cache | 2.80 s (`go list` 2.5 s) | 1.65 s (`go list` 1.1 s, `Definition` 0.46 s) |
-| next call | 0.11 s | 0.16 s |
-| after an edit outside the imports | 0.10 s | 0.20 s |
-| after an edit of the imports | 0.39 s | 0.51 s |
-| first call in a second worktree | 0.50 s | 0.66 s |
-| next call in the second worktree | 0.10 s | 0.17 s |
+| Call | `x/tools` `Definition` | `x/tools` `References` | `x/tools/gopls` `Definition` | `x/tools/gopls` `References` |
+|---|---|---|---|---|
+| first call, empty cache | 0.77 s | 1.37 s | 1.17 s | 1.80 s |
+| next call | 0.10–0.13 s | 0.21–0.22 s | 0.28–0.34 s | 0.48–0.50 s |
+| after an edit outside the imports | 0.13 s | 0.36 s | 0.28 s | 0.64 s |
+| after an edit of the imports | 0.51 s | 0.74 s | 0.77 s | 1.03 s |
+| first call in a second worktree | 0.59 s | 0.85 s | 1.10 s | 1.32 s |
+| next call in the second worktree | 0.10 s | 0.29 s | 0.32 s | 0.57 s |
 
-The cache file grows to 4.7 MB with one worktree of the gopls module and 8.7 MB with two.
+`References` of the interface type `ssa.Value` of `golang.org/x/tools` (292 uses, 33 implementations): 3.3 s on the
+first call, 0.49–0.74 s on the next ones. With two worktrees of the gopls module the cache file is 13 MB after the
+`Definition` calls above and 37 MB after the `References` calls.
 
 ## PHP
 

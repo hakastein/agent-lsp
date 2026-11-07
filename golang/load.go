@@ -104,7 +104,8 @@ func (l *loader) configKey(cfg *packages.Config, patterns []string) [sha256.Size
 	fmt.Fprintf(h, "%s\x00%q\x00%q\x00", cfg.Dir, patterns, cfg.BuildFlags)
 	var env []string
 	for _, kv := range cfg.Env {
-		if strings.HasPrefix(kv, "GO") || strings.HasPrefix(kv, "CGO_") {
+		// GOOS of the process is overridden by GOOS of the view, which l.env names below
+		if (strings.HasPrefix(kv, "GO") || strings.HasPrefix(kv, "CGO_")) && !strings.HasPrefix(kv, "GOOS=") {
 			env = append(env, kv)
 		}
 	}

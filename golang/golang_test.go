@@ -2,6 +2,7 @@ package golang_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -48,6 +49,7 @@ func TestDefinition(t *testing.T) {
 	}{
 		{"method call", place{"main.go", "Add(cart.Item"}, []decl{add}},
 		{"method declaration", place{cartGo, "Add(it Item)"}, []decl{add}},
+		{"call in a file built for windows only", place{"cart/discount_windows.go", "Add(it)"}, []decl{add}},
 		{"type", place{"main.go", "Cart{}"}, []decl{cartType}},
 		{"field", place{"main.go", "Items, basket"}, []decl{items}},
 		{"constant in parentheses", place{cartGo, "MaxItems = 100"}, []decl{maxItems}},
@@ -112,7 +114,8 @@ func TestDefinitionInVendor(t *testing.T) {
 	}}), got)
 }
 
-func TestDefinitionPositionErrors(t *testing.T) {
+// A position that is not a place in a file of the root is an error of Definition and References alike.
+func TestPositionErrors(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
 	main := filepath.Join(root, "main.go")
@@ -131,16 +134,81 @@ func TestDefinitionPositionErrors(t *testing.T) {
 		{"column past the end of the line", agentlsp.Position{File: main, Line: 12, Column: 63}, "no column 63: line 12 has columns 1 to 62"},
 		{"end of the line", agentlsp.Position{File: main, Line: 12, Column: 62}, ""},
 	}
-	var got []error
+	var defs, refs []error
 	session(t, root, func(ix *golang.Index) {
 		for _, tt := range tests {
 			_, err := ix.Definition(tt.at)
-			got = append(got, err)
+			defs = append(defs, err)
+			_, err = ix.References(tt.at)
+			refs = append(refs, err)
 		}
 	})
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, problem(tt.at, got[i]))
+			assert.Equal(t, []string{tt.want, tt.want}, []string{problem(tt.at, defs[i]), problem(tt.at, refs[i])})
+		})
+	}
+}
+
+// A .go file that none of linux, darwin and windows builds is in no package: a question about it is an error.
+func TestFileOfNoPlatform(t *testing.T) {
+	cache(t)
+	root := newRoot(t)
+	at := place{"cart/cart_plan9.go", "plan9() {}"}.position(t, root)
+	var defErr, refsErr error
+	session(t, root, func(ix *golang.Index) {
+		_, defErr = ix.Definition(at)
+		_, refsErr = ix.References(at)
+	})
+	assert.ErrorContains(t, defErr, "cart_plan9.go is in no package for linux, darwin, windows")
+	assert.ErrorContains(t, refsErr, "cart_plan9.go is in no package for linux, darwin, windows")
+}
+
+// References joins the answers of linux, darwin and windows: a use or an implementation in a file one of them builds
+// is in it, a place all of them see is in it once. The answer is the same from a use and from the declaration.
+func TestReferences(t *testing.T) {
+	cache(t)
+	root := newRoot(t)
+	const (
+		listGo     = "cart/list.go"
+		discountGo = "cart/discount_windows.go"
+		restockGo  = "cart/restock_darwin.go"
+	)
+	addCalls := []place{{discountGo, "Add(it)"}, {restockGo, "Add(c.Items[0])"}, {"main.go", "Add(cart.Item"}}
+	priceCalls := []place{{discountGo, "Price(it)"}, {listGo, "Price(it)"}}
+
+	tests := []struct {
+		name  string
+		at    place
+		uses  []place
+		impls []place
+	}{
+		{"method call", place{"main.go", "Add(cart.Item"}, addCalls, nil},
+		{"method declaration", place{cartGo, "Add(it Item)"}, addCalls, nil},
+		{"call in a file built for windows only", place{discountGo, "Add(it)"}, addCalls, nil},
+		{"call in a file built for darwin only", place{restockGo, "Add(c.Items[0])"}, addCalls, nil},
+		{"interface method", place{cartGo, "Price(it Item)"}, priceCalls,
+			[]place{{discountGo, "Price(it Item)"}, {listGo, "Price(it Item)"}}},
+		{"interface type", place{cartGo, "Pricer interface"}, []place{{discountGo, "Pricer, it"}, {listGo, "Pricer, it"}},
+			[]place{{discountGo, "Discount struct{}"}, {listGo, "List struct{}"}}},
+		{"method of a concrete type", place{listGo, "Price(it Item)"}, priceCalls, nil},
+		{"field", place{cartGo, "Items []Item"}, []place{{cartGo, "Items = append"}, {cartGo, "Items, it)"},
+			{cartGo, "Items))"}, {restockGo, "Items[0]"}, {"main.go", "Items, basket"}}, nil},
+		{"whitespace", place{"main.go", "\tbasket.Add"}, nil, nil},
+	}
+	var got []agentlsp.References
+	var errs []error
+	session(t, root, func(ix *golang.Index) {
+		for _, tt := range tests {
+			refs, err := ix.References(tt.at.position(t, root))
+			got, errs = append(got, refs), append(errs, err)
+		}
+	})
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, errs[i])
+			assert.Equal(t, agentlsp.References{Uses: locations(t, root, tt.uses),
+				Implementations: locations(t, root, tt.impls)}, got[i])
 		})
 	}
 }
@@ -164,7 +232,20 @@ func TestSymbols(t *testing.T) {
 		{"package, type and method", "cart.Cart.Add", []symbol{addMethod}},
 		{"package path, type and method", "example.com/shop/cart.Cart.Add", []symbol{addMethod}},
 		{"package and constant", "cart.MaxItems", []symbol{{"MaxItems", "const", "", maxItems}}},
-		{"bare name of a field and an interface method", "Price", []symbol{itemPrice, {"Price", "method", "Pricer", pricerPrice}}},
+		{"bare name of fields and methods", "Price", []symbol{itemPrice, {"Price", "method", "Pricer", pricerPrice},
+			{"Price", "method", "Discount", decl{
+				name: place{"cart/discount_windows.go", "Price(it Item)"}, from: "func (Discount) Price", to: "it.Price / 2 }",
+				signature: "func (Discount) Price(it Item) money.Amount", doc: "// Price is half the price of it.",
+			}},
+			{"Price", "method", "List", decl{
+				name: place{"cart/list.go", "Price(it Item)"}, from: "func (List) Price", to: "return it.Price }",
+				signature: "func (List) Price(it Item) money.Amount", doc: "// Price is the price of it.",
+			}},
+		}},
+		{"type built for windows only", "Discount", []symbol{{"Discount", "type", "", decl{
+			name: place{"cart/discount_windows.go", "Discount struct{}"}, from: "type Discount struct{}",
+			to: "type Discount struct{}", signature: "type Discount struct", doc: "// Discount prices an item at half its price.",
+		}}}},
 		{"field", "Cart.Items", []symbol{{"Items", "field", "Cart", items}}},
 		{"function of package main", "main.main", []symbol{{"main", "func", "", decl{
 			name: place{"main.go", "main() {"}, from: "func main() {", to: "basket.Total())\n}", signature: "func main()",
@@ -235,11 +316,12 @@ func TestOutline(t *testing.T) {
 }
 
 // Each Open is a new process as far as the index goes: a new session of gopls, and the cache database. The stored
-// load of packages serves while the files keep their package names and imports; any other edit is still seen.
+// load of packages serves while the files keep their package names and imports; any other edit is still seen. The
+// question is in a file built for windows only: GOOS of the environment changes no answer.
 func TestReopen(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
-	call := place{"main.go", "Add(cart.Item"}
+	call := place{"cart/discount_windows.go", "Add(it)"}
 
 	steps := []struct {
 		name    string
@@ -261,6 +343,7 @@ func TestReopen(t *testing.T) {
 		{"a new file loads again", func() {
 			require.NoError(t, os.WriteFile(filepath.Join(root, "cart", "empty.go"), []byte("package cart\n"), 0o600))
 		}, loaded},
+		{"GOOS of the environment reuses the load", func() { t.Setenv("GOOS", "darwin") }, reused},
 	}
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
@@ -300,7 +383,7 @@ func TestSecondWorktree(t *testing.T) {
 	assert.Equal(t, declarations(t, second, []decl{add}), got)
 }
 
-// A stored load of packages depends on the target platform and the build flags, as the go command sees them: from
+// A stored load of packages depends on the target architecture and the build flags, as the go command sees them: from
 // the environment of the process and from the file of go env -w (GOENV). A load for another one is never reused.
 func TestLoadOfAnotherPlatformIsNotReused(t *testing.T) {
 	setenv := func(name, value string) func(t *testing.T, goenv string) {
@@ -310,7 +393,6 @@ func TestLoadOfAnotherPlatformIsNotReused(t *testing.T) {
 		name   string
 		change func(t *testing.T, goenv string)
 	}{
-		{"GOOS", setenv("GOOS", "windows")},
 		{"GOARCH", setenv("GOARCH", "arm64")},
 		{"build tags", setenv("GOFLAGS", "-tags=premium")},
 		{"build tags of go env -w", func(t *testing.T, goenv string) {
@@ -370,16 +452,34 @@ func TestCloseTwice(t *testing.T) {
 	assert.NoError(t, ix.Close())
 }
 
+// A process of a program that imports the library makes no directory in the user cache directory but its own cache:
+// gopls would make goimports there on start. A test binary keeps it under the temporary directory instead, so the
+// test runs a program built from testdata/open.
+func TestOpenMakesNoGoimportsDirectory(t *testing.T) {
+	// .exe: Windows starts a file only by an executable extension; elsewhere the name does not matter.
+	bin := filepath.Join(t.TempDir(), "open.exe")
+	build := exec.Command("go", "build", "-o", bin, "./testdata/open")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, "go build:\n%s", out)
+	cache(t)
+	dir, err := os.UserCacheDir()
+	require.NoError(t, err)
+
+	out, err = exec.Command(bin, newRoot(t)).CombinedOutput()
+
+	require.NoError(t, err, "%s", out)
+	assert.DirExists(t, filepath.Join(dir, "agent-lsp"))
+	assert.NoDirExists(t, filepath.Join(dir, "goimports"))
+}
+
 func TestNotSupported(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
-	var refsErr, renameErr error
+	var renameErr error
 	session(t, root, func(ix *golang.Index) {
-		at := place{"main.go", "Add(cart.Item"}.position(t, root)
-		_, refsErr = ix.References(at)
-		_, renameErr = ix.Rename(at, "Put")
+		_, renameErr = ix.Rename(place{"main.go", "Add(cart.Item"}.position(t, root), "Put")
 	})
-	assert.ErrorIs(t, refsErr, agentlsp.ErrNotSupported)
 	assert.ErrorIs(t, renameErr, agentlsp.ErrNotSupported)
 }
 
