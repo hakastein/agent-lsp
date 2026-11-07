@@ -1,17 +1,17 @@
-// Package php answers questions about the .php files under a root from an index in SQLite on disk: the files it
-// was built from, the method Symbols and the resolved links «place → Symbol». Links are resolved while indexing; a
-// question only reads them. The rules are those of docs/adr/0001-workspace-index-on-disk.md.
+// Package php answers questions about the .php files under a root: the declarations of classes, interfaces, traits,
+// enums, functions, constants, methods and class constants, and the places that name them. The facts of a file live
+// in the cache database of the user under the hash of its content, so roots and worktrees with the same files share
+// them; a root keeps only its map «path → hash». The standard library is the phpstorm-stubs the binary embeds
+// (stubs/STUBS.md). The rules are those of docs/adr/0001-workspace-index-on-disk.md.
 package php
 
 import (
 	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,30 +19,32 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"time"
 
-	_ "modernc.org/sqlite"
+	"golang.org/x/sync/errgroup"
 
 	agentlsp "github.com/hakastein/agent-lsp"
+	"github.com/hakastein/agent-lsp/internal/cachedb"
 	"github.com/hakastein/agent-lsp/internal/position"
 	"github.com/hakastein/agent-lsp/php/internal/facts"
 )
 
-// schemaDir names the schema and the link semantics of the index. An incompatible change of either gets a new name,
-// so an index of another schema or with links resolved by other rules is never opened.
-const schemaDir = "index-v3"
+// rules names the rules by which facts are extracted from a file and resolved. An incompatible change of them gets
+// a new name; an incompatible change of the tables gets new tables (php2_…).
+const rules = "php1 rules 1"
 
 // parserModule is the module of the PHP parser; the binary may be linked with a module that replaces it.
 const parserModule = "github.com/VKCOM/php-parser"
 
-// indexDir is the directory of every index this binary builds: schemaDir and the parser module the binary is linked
-// with. An index whose facts another parser extracted has the same snapshot of files, so it lives elsewhere and is
-// never opened.
-func indexDir() (string, error) {
+// salt enters the key of the facts of every file: the rules and the parser the binary is linked with. Facts that
+// another build extracted are never read.
+func salt() ([]byte, error) {
 	sum, err := parserSum()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return schemaDir + "-" + hex.EncodeToString(sum[:6]), nil
+	s := sha256.Sum256(append([]byte(rules+"\x00"), sum[:]...))
+	return s[:16], nil
 }
 
 // parserSum names the parser the binary is linked with: the sha256 of its module path and version. A binary that
@@ -90,45 +92,51 @@ func executableSum() ([sha256.Size]byte, error) {
 	return sum, nil
 }
 
+// schema holds the PHP tables of the cache database.
+//
+// php1_files is the map «path → sha256 of the content» of each root, with the size and the modification time the
+// file was hashed at: a file whose size and time are the same is not read again. The stubs are a root of their own.
+// php1_facts names the facts of a content extracted by a salt; php1_decls and php1_links are those facts, deleted with
+// their row of php1_facts.
 const schema = `
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, hash BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS symbols (
-	key TEXT NOT NULL, file INTEGER NOT NULL,
+CREATE TABLE IF NOT EXISTS php1_files (
+	root TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL, hash BLOB NOT NULL,
+	used INTEGER NOT NULL, PRIMARY KEY (root, path)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS php1_files_hash ON php1_files (hash);
+CREATE INDEX IF NOT EXISTS php1_files_used ON php1_files (used);
+CREATE TABLE IF NOT EXISTS php1_facts (
+	id INTEGER PRIMARY KEY, hash BLOB NOT NULL, salt BLOB NOT NULL, used INTEGER NOT NULL, UNIQUE (hash, salt));
+CREATE INDEX IF NOT EXISTS php1_facts_used ON php1_facts (used);
+CREATE TABLE IF NOT EXISTS php1_decls (
+	facts INTEGER NOT NULL REFERENCES php1_facts (id) ON DELETE CASCADE,
+	key TEXT NOT NULL, lname TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, container TEXT NOT NULL,
+	sl INTEGER NOT NULL, sc INTEGER NOT NULL, el INTEGER NOT NULL, ec INTEGER NOT NULL,
+	rsl INTEGER NOT NULL, rsc INTEGER NOT NULL, rel INTEGER NOT NULL, rec INTEGER NOT NULL,
+	signature TEXT NOT NULL, doc TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS php1_decls_facts ON php1_decls (facts);
+CREATE INDEX IF NOT EXISTS php1_decls_key ON php1_decls (key);
+CREATE INDEX IF NOT EXISTS php1_decls_lname ON php1_decls (lname);
+CREATE TABLE IF NOT EXISTS php1_links (
+	facts INTEGER NOT NULL REFERENCES php1_facts (id) ON DELETE CASCADE,
+	key TEXT NOT NULL, fallback TEXT NOT NULL,
 	sl INTEGER NOT NULL, sc INTEGER NOT NULL, el INTEGER NOT NULL, ec INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS symbols_key ON symbols (key);
-CREATE INDEX IF NOT EXISTS symbols_place ON symbols (file, sl);
-CREATE TABLE IF NOT EXISTS links (
-	key TEXT NOT NULL, file INTEGER NOT NULL,
-	sl INTEGER NOT NULL, sc INTEGER NOT NULL, el INTEGER NOT NULL, ec INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS links_key ON links (key);
-CREATE INDEX IF NOT EXISTS links_place ON links (file, sl);
+CREATE INDEX IF NOT EXISTS php1_links_facts ON php1_links (facts, sl);
+CREATE INDEX IF NOT EXISTS php1_links_key ON php1_links (key);
+CREATE INDEX IF NOT EXISTS php1_links_fallback ON php1_links (fallback) WHERE fallback != '';
 `
 
-// Index is the index of the .php files under one root.
+// Index is the index of the .php files under one root and of the stubs.
 type Index struct {
-	root string
-	db   *sql.DB
+	root  string
+	db    *cachedb.DB
+	salt  []byte
+	stubs string // the root of the stubs in php1_files
 }
 
-// indexPath is the index file of root. The package chooses it: a directory per root under the user's cache
-// directory.
-func indexPath(root string) (string, error) {
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	dir, err := indexDir()
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256([]byte(root))
-	return filepath.Join(cache, "agent-lsp", "php", dir, hex.EncodeToString(sum[:16]), "index.sqlite"), nil
-}
-
-// Open opens the index of root and makes it describe the .php files under root. An index whose snapshot of files
-// («path → hash») equals the files on disk is used as it is; otherwise the whole index is built again. Answers come
-// from the files as they were at Open. logf, if not nil, receives diagnostic lines; they are not a contract.
+// Open opens the index of root, a directory with a composer.json file or a .git entry, and brings it up to the
+// .php files under root: a file whose size or modification time changed is hashed again, and a content whose facts
+// the cache does not hold is parsed. The stubs are parsed once for a cache. Answers come from the files as they were
+// at Open. logf, if not nil, receives diagnostic lines; they are not a contract.
 func Open(root string, logf func(format string, args ...any)) (*Index, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -137,61 +145,55 @@ func Open(root string, logf func(format string, args ...any)) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := indexPath(root)
+	if !exists(filepath.Join(root, "composer.json")) && !exists(filepath.Join(root, ".git")) {
+		return nil, fmt.Errorf("php: %s: no composer.json or .git", root)
+	}
+	s, err := salt()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		return nil, err
-	}
-	// A URI with an escaped path: a ? or % in the path is a part of the name, not the start of the query.
-	uri := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(file), "/")}
-	db, err := sql.Open("sqlite", uri.String()+"?_pragma=busy_timeout(60000)&_txlock=immediate")
+	stubs, err := embeddedStubs()
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1) // a build transaction and its temporary table live on one connection
-	ix := &Index{root: root, db: db}
-	if err := ix.prepare(logf); err != nil {
+	db, err := cachedb.Open(schema)
+	if err != nil {
+		return nil, err
+	}
+	ix := &Index{root: root, db: db, salt: s, stubs: "stubs:" + stubs.digest}
+	if err := ix.open(stubs, logf); err != nil {
 		db.Close()
-		return nil, err
+		return nil, db.Err(err)
 	}
 	return ix, nil
 }
 
-// Close closes the index file. A second Close does nothing.
-func (ix *Index) Close() error {
-	return ix.db.Close()
-}
-
-func (ix *Index) prepare(logf func(string, ...any)) error {
-	if _, err := ix.db.Exec(schema); err != nil {
+func (ix *Index) open(stubs stubSet, logf func(string, ...any)) error {
+	n, parsed, err := ix.index(source{key: ix.stubs, paths: stubs.paths, stat: stubs.stat, read: stubs.read}, logf)
+	if err != nil {
 		return err
 	}
+	logf("php: stubs: %d files, %d parsed", n, parsed)
 	paths, err := phpFiles(ix.root, logf)
 	if err != nil {
 		return err
 	}
-	complete, err := ix.complete()
+	n, parsed, err = ix.index(source{key: ix.root, paths: paths, stat: ix.stat, read: ix.read}, logf)
 	if err != nil {
 		return err
 	}
-	if complete {
-		same, n, err := ix.sameFiles(paths, logf)
-		if err != nil {
-			return err
-		}
-		if same {
-			logf("php: index reused: %d files", n)
-			return nil
-		}
-	}
-	n, err := ix.build(paths, logf)
-	if err != nil {
-		return err
-	}
-	logf("php: index built: %d files", n)
+	logf("php: root: %d files, %d parsed", n, parsed)
 	return nil
+}
+
+// Close closes the cache database. A second Close does nothing.
+func (ix *Index) Close() error {
+	return ix.db.Close()
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // phpFiles lists the .php files under root, relative, with forward slashes, sorted. Symlinks are followed, to files
@@ -267,71 +269,76 @@ func broken(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSymlinkLoop)
 }
 
-// snapshotFile reads the file p under root and hashes it for the snapshot. A name that is no longer a regular file
-// is logged and is not part of the snapshot: ok is false. Any other error is returned: the snapshot cannot be known
-// without the file.
-func snapshotFile(root, p string, logf func(string, ...any)) (src []byte, sum [sha256.Size]byte, ok bool, err error) {
-	src, err = position.ReadFile(filepath.Join(root, filepath.FromSlash(p)))
+// stat is the size and the modification time of the file p under the root, through symlinks.
+func (ix *Index) stat(p string) (int64, int64, error) {
+	info, err := os.Stat(filepath.Join(ix.root, filepath.FromSlash(p)))
+	if err != nil {
+		return 0, 0, err
+	}
+	return info.Size(), info.ModTime().UnixNano(), nil
+}
+
+// read reads the file p under the root. A name that is no longer a regular file is not part of the root: ok is
+// false. Any other error is returned: the root cannot be known without the file.
+func (ix *Index) read(p string) (src []byte, ok bool, err error) {
+	src, err = position.ReadFile(filepath.Join(ix.root, filepath.FromSlash(p)))
 	if errors.Is(err, position.ErrNotRegular) {
-		logf("php: skip %s: %v", p, err)
-		return nil, sum, false, nil
+		return nil, false, nil
 	}
+	return src, err == nil, err
+}
+
+// source is the files of a root of php1_files: the .php files under a root or the stubs.
+type source struct {
+	key   string
+	paths []string
+	stat  func(p string) (size, mtime int64, err error)
+	read  func(p string) (src []byte, ok bool, err error)
+}
+
+// stored is a row of php1_files; missing is set when the cache holds no facts of its hash for the salt.
+type stored struct {
+	size, mtime int64
+	hash        []byte
+	missing     bool
+}
+
+// entry is what index learns of a file of a source.
+type entry struct {
+	size, mtime int64
+	hash        []byte
+	skip        bool         // not a regular file
+	write       bool         // the row of php1_files is new or changed
+	facts       *facts.Facts // facts to store, nil when the cache holds them
+	syntax      []string     // syntax errors of the parsed file
+}
+
+// index brings the rows of s.key in php1_files up to the files of s and stores the facts the cache does not hold,
+// in one transaction; it returns the number of files and of files parsed. A file that cannot be read fails it and
+// leaves the previous state.
+func (ix *Index) index(s source, logf func(string, ...any)) (files, parsed int, err error) {
+	rows, err := ix.storedFiles(s.key)
 	if err != nil {
-		return nil, sum, false, err
+		return 0, 0, err
 	}
-	return src, sha256.Sum256(src), true, nil
-}
+	entries := make([]entry, len(s.paths))
+	var g errgroup.Group
+	g.SetLimit(runtime.GOMAXPROCS(0))
+	for i, p := range s.paths {
+		g.Go(func() error {
+			if err := ix.prepare(s, p, rows[p], &entries[i]); err != nil {
+				return fmt.Errorf("%s: %w", p, err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return 0, 0, err
+	}
 
-func (ix *Index) complete() (bool, error) {
-	err := ix.db.QueryRow(`SELECT 1 FROM meta WHERE key = 'complete'`).Scan(new(int))
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
-// sameFiles reports whether the stored snapshot equals the files on disk and how many files it holds. A file that
-// cannot be read is an error, never a match.
-func (ix *Index) sameFiles(paths []string, logf func(string, ...any)) (bool, int, error) {
-	stored := map[string]string{}
-	rows, err := ix.db.Query(`SELECT path, lower(hex(hash)) FROM files`)
-	if err != nil {
-		return false, 0, err
-	}
-	for rows.Next() {
-		var p, sum string
-		if err := rows.Scan(&p, &sum); err != nil {
-			rows.Close()
-			return false, 0, err
-		}
-		stored[p] = sum
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return false, 0, err
-	}
-	read := 0
-	for _, p := range paths {
-		_, sum, ok, err := snapshotFile(ix.root, p, logf)
-		if err != nil {
-			return false, 0, err
-		}
-		if !ok {
-			continue
-		}
-		read++
-		if stored[p] != hex.EncodeToString(sum[:]) {
-			return false, 0, nil
-		}
-	}
-	return read == len(stored), read, nil
-}
-
-// build replaces the whole index in one transaction and returns the number of files indexed. A build that does
-// not finish, also on a file that cannot be read, leaves the previous state.
-func (ix *Index) build(paths []string, logf func(string, ...any)) (n int, err error) {
 	tx, err := ix.db.Begin()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer func() {
 		if err != nil {
@@ -340,80 +347,155 @@ func (ix *Index) build(paths []string, logf func(string, ...any)) (n int, err er
 		}
 		err = tx.Commit()
 	}()
-
-	if _, err := tx.Exec(`
-		DELETE FROM meta; DELETE FROM files; DELETE FROM symbols; DELETE FROM links;
-		CREATE TEMP TABLE calls (key TEXT NOT NULL, file INTEGER NOT NULL,
-			sl INTEGER NOT NULL, sc INTEGER NOT NULL, el INTEGER NOT NULL, ec INTEGER NOT NULL);`); err != nil {
-		return 0, err
-	}
-	insFile, err := tx.Prepare(`INSERT INTO files (path, hash) VALUES (?, ?)`)
-	if err != nil {
-		return 0, err
-	}
-	defer insFile.Close()
-	insSymbol, err := tx.Prepare(`INSERT INTO symbols (key, file, sl, sc, el, ec) VALUES (?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return 0, err
-	}
-	defer insSymbol.Close()
-	insCall, err := tx.Prepare(`INSERT INTO temp.calls (key, file, sl, sc, el, ec) VALUES (?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return 0, err
-	}
-	defer insCall.Close()
-
-	for _, p := range paths {
-		src, sum, ok, err := snapshotFile(ix.root, p, logf)
-		if err != nil {
-			return 0, err
-		}
-		if !ok {
+	now := time.Now().Unix()
+	for i, p := range s.paths {
+		e := &entries[i]
+		if e.skip {
+			logf("php: skip %s: %v", p, position.ErrNotRegular)
 			continue
 		}
-		n++
-		res, err := insFile.Exec(p, sum[:])
-		if err != nil {
-			return 0, fmt.Errorf("%s: %w", p, err)
+		files++
+		delete(rows, p)
+		for _, msg := range e.syntax {
+			logf("php: %s: %s", p, msg)
 		}
-		file, err := res.LastInsertId()
-		if err != nil {
-			return 0, fmt.Errorf("%s: %w", p, err)
-		}
-		found, syntax := facts.Parse(src)
-		for _, e := range syntax {
-			logf("php: %s: %s", p, e)
-		}
-		for _, m := range found.Methods {
-			if err := insert(insSymbol, m.Key, file, m.Name); err != nil {
-				return 0, fmt.Errorf("%s: %w", p, err)
+		if e.facts != nil {
+			parsed++
+			if err := ix.storeFacts(tx, e.hash, *e.facts, now); err != nil {
+				return 0, 0, fmt.Errorf("%s: %w", p, err)
 			}
 		}
-		for _, c := range found.Calls {
-			if err := insert(insCall, c.Key, file, c.Name); err != nil {
-				return 0, fmt.Errorf("%s: %w", p, err)
+		if e.write {
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO php1_files (root, path, size, mtime, hash, used)
+				VALUES (?, ?, ?, ?, ?, ?)`, s.key, p, e.size, e.mtime, e.hash, now); err != nil {
+				return 0, 0, err
+			}
+			if _, err := tx.Exec(`UPDATE php1_facts SET used = ? WHERE hash = ? AND salt = ?`,
+				now, e.hash, ix.salt); err != nil {
+				return 0, 0, err
 			}
 		}
 	}
-	// A call becomes a link only when its target Symbol is declared somewhere under the root.
-	_, err = tx.Exec(`
-		INSERT INTO links (key, file, sl, sc, el, ec)
-			SELECT key, file, sl, sc, el, ec FROM temp.calls c
-			WHERE EXISTS (SELECT 1 FROM symbols s WHERE s.key = c.key);
-		DROP TABLE temp.calls;
-		INSERT INTO meta (key, value) VALUES ('complete', '1');`)
-	return n, err
+	for p := range rows {
+		if _, err := tx.Exec(`DELETE FROM php1_files WHERE root = ? AND path = ?`, s.key, p); err != nil {
+			return 0, 0, err
+		}
+	}
+	return files, parsed, ix.touch(tx, s.key, now)
 }
 
-// insert runs stmt with a key, a file id and a range.
-func insert(stmt *sql.Stmt, key string, file int64, r facts.Range) error {
-	_, err := stmt.Exec(key, file, r.Start.Line, r.Start.Column, r.End.Line, r.End.Column)
+// storedFiles is the rows of php1_files of root by path.
+func (ix *Index) storedFiles(root string) (map[string]stored, error) {
+	rows, err := ix.db.Query(`SELECT f.path, f.size, f.mtime, f.hash, x.id IS NULL FROM php1_files f
+		LEFT JOIN php1_facts x ON x.hash = f.hash AND x.salt = ? WHERE f.root = ?`, ix.salt, root)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]stored{}
+	for rows.Next() {
+		var p string
+		var r stored
+		if err := rows.Scan(&p, &r.size, &r.mtime, &r.hash, &r.missing); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out[p] = r
+	}
+	return out, errors.Join(rows.Err(), rows.Close())
+}
+
+// prepare fills e for the file p of s whose row is r: the hash from r when the size and the time are those of r and
+// its facts are stored, otherwise from the content, which is parsed when the cache holds no facts of it.
+func (ix *Index) prepare(s source, p string, r stored, e *entry) error {
+	var err error
+	if e.size, e.mtime, err = s.stat(p); err != nil {
+		return err
+	}
+	if r.hash != nil && r.size == e.size && r.mtime == e.mtime && !r.missing {
+		e.hash = r.hash
+		return nil
+	}
+	src, ok, err := s.read(p)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		e.skip = true
+		return nil
+	}
+	sum := sha256.Sum256(src)
+	e.hash = sum[:]
+	e.write = r.hash == nil || r.size != e.size || r.mtime != e.mtime || string(r.hash) != string(e.hash)
+	var held bool
+	err = ix.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM php1_facts WHERE hash = ? AND salt = ?)`, e.hash, ix.salt).
+		Scan(&held)
+	if err != nil || held {
+		return err
+	}
+	f, syntax := facts.Parse(src)
+	e.facts, e.syntax = &f, syntax
+	return nil
+}
+
+// storeFacts stores the facts of a content unless another process has just stored them.
+func (ix *Index) storeFacts(tx *sql.Tx, hash []byte, f facts.Facts, now int64) error {
+	res, err := tx.Exec(`INSERT OR IGNORE INTO php1_facts (hash, salt, used) VALUES (?, ?, ?)`, hash, ix.salt, now)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	decl, err := tx.Prepare(`INSERT INTO php1_decls (facts, key, lname, kind, name, container, sl, sc, el, ec,
+		rsl, rsc, rel, rec, signature, doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer decl.Close()
+	for _, d := range f.Decls {
+		n, r := d.NameRange, d.Range
+		if _, err := decl.Exec(id, d.Key, strings.ToLower(d.Name), string(d.Kind), d.Name, d.Container,
+			n.Start.Line, n.Start.Column, n.End.Line, n.End.Column, r.Start.Line, r.Start.Column, r.End.Line,
+			r.End.Column, d.Signature, d.Doc); err != nil {
+			return err
+		}
+	}
+	link, err := tx.Prepare(`INSERT INTO php1_links (facts, key, fallback, sl, sc, el, ec) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer link.Close()
+	for _, r := range f.Links {
+		if _, err := link.Exec(id, r.Key, r.Fallback, r.Name.Start.Line, r.Name.Start.Column, r.Name.End.Line,
+			r.Name.End.Column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// touch marks the rows of root and their facts used, at most once a day.
+func (ix *Index) touch(tx *sql.Tx, root string, now int64) error {
+	day := now - int64(24*time.Hour/time.Second)
+	res, err := tx.Exec(`UPDATE php1_files SET used = ? WHERE root = ? AND used < ?`, now, root, day)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE php1_facts SET used = ?1 WHERE salt = ?2 AND used < ?3
+		AND hash IN (SELECT hash FROM php1_files WHERE root = ?4)`, now, ix.salt, day, root)
 	return err
 }
 
-// Definition is the declarations of the Symbol at pos: the one a link there points to, or the one declared there.
-// Each is the name of the method; its Range is the name too, and it has no Signature and no Doc. A place in a file
-// of the root where no Symbol is has none. A position that is not such a place is an error that repeats pos and
+// Definition is the declarations of the symbol at pos: the one the name or the method call at pos names, or the
+// one declared at pos; they may be under the root, in its vendor directory or in the stubs. A place in a file of
+// the root that names nothing declared has none. A position that is not such a place is an error that repeats pos and
 // names the problem: a relative path, a file outside the root or one that does not exist, a line or a column
 // outside the file. The file is read as it is on disk; a column may stand right after the last byte of its line.
 func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Declaration, error) {
@@ -421,26 +503,48 @@ func (ix *Index) Definition(pos agentlsp.Position) ([]agentlsp.Declaration, erro
 	if err != nil || key == "" {
 		return nil, err
 	}
-	names, err := ix.locations(`SELECT f.path, s.sl, s.sc, s.el, s.ec FROM symbols s JOIN files f ON f.id = s.file
-		WHERE s.key = ? ORDER BY f.path, s.sl, s.sc`, key)
+	syms, err := ix.symbols(`d.key = ?`, key)
 	var out []agentlsp.Declaration
-	for _, name := range names {
-		out = append(out, agentlsp.Declaration{Location: name, Range: name})
+	for _, s := range syms {
+		out = append(out, s.Declaration)
 	}
 	return out, err
 }
 
-// References is every link to the Symbol at pos, in Uses. There is no hierarchy, so Implementations is empty, and
-// calls whose receiver class is unknown are not collected, so Unresolved is empty too. Its answer to a place where
-// no Symbol is and its errors on a position are those of Definition.
+// References is every place under the root that names the symbol at pos, in Uses. There is no hierarchy, so
+// Implementations is empty, and calls whose receiver class is unknown are not collected, so Unresolved is empty
+// too. Its answer to a place where no symbol is and its errors on a position are those of Definition.
 func (ix *Index) References(pos agentlsp.Position) (agentlsp.References, error) {
 	key, err := ix.symbolAt(pos)
 	if err != nil || key == "" {
 		return agentlsp.References{}, err
 	}
-	uses, err := ix.locations(`SELECT f.path, l.sl, l.sc, l.el, l.ec FROM links l JOIN files f ON f.id = l.file
-		WHERE l.key = ? ORDER BY f.path, l.sl, l.sc`, key)
-	return agentlsp.References{Uses: uses}, err
+	rows, err := ix.db.Query(`SELECT f.path, r.sl, r.sc, r.el, r.ec FROM php1_links r
+		JOIN php1_facts x ON x.id = r.facts JOIN php1_files f ON f.hash = x.hash
+		WHERE x.salt = ?1 AND f.root = ?2 AND (r.key = ?3 OR r.fallback = ?3 AND NOT `+declared(`r.key`)+`)
+		ORDER BY f.path, r.sl, r.sc`, ix.salt, ix.root, key, ix.stubs)
+	if err != nil {
+		return agentlsp.References{}, ix.db.Err(err)
+	}
+	defer rows.Close()
+	var uses []agentlsp.Location
+	for rows.Next() {
+		var p string
+		var l agentlsp.Location
+		if err := rows.Scan(&p, &l.Line, &l.Column, &l.EndLine, &l.EndColumn); err != nil {
+			return agentlsp.References{}, ix.db.Err(err)
+		}
+		l.File = filepath.Join(ix.root, filepath.FromSlash(p))
+		uses = append(uses, l)
+	}
+	return agentlsp.References{Uses: uses}, ix.db.Err(rows.Err())
+}
+
+// declared is an SQL condition: a declaration with the key the expression key gives is in the root ?2 or in the
+// stubs ?4 for the salt ?1.
+func declared(key string) string {
+	return `EXISTS (SELECT 1 FROM php1_decls d2 JOIN php1_facts x2 ON x2.id = d2.facts
+		JOIN php1_files f2 ON f2.hash = x2.hash WHERE d2.key = ` + key + ` AND x2.salt = ?1 AND f2.root IN (?2, ?4))`
 }
 
 // Rename is not supported.
@@ -448,36 +552,143 @@ func (ix *Index) Rename(pos agentlsp.Position, name string) (agentlsp.Renaming, 
 	return agentlsp.Renaming{}, fmt.Errorf("php: rename: %w", agentlsp.ErrNotSupported)
 }
 
-// Symbols is not supported.
+// Symbols is the declarations with the name: a bare name (Cart, add), a name in its class (Cart::add), a name in
+// its namespace (Shop\Cart, \Shop\Cart, Shop\Cart::add). A bare name matches the last segment of every qualified
+// name. Names compare as PHP compares them: case-insensitively, but for the names of constants and class constants.
+// Declarations of the root, its vendor directory and the stubs are searched; those of the root and its vendor
+// directory come first, in the order of their files and lines.
 func (ix *Index) Symbols(name string) ([]agentlsp.Symbol, error) {
-	return nil, fmt.Errorf("php: symbols: %w", agentlsp.ErrNotSupported)
+	q := strings.TrimPrefix(name, `\`)
+	i := strings.LastIndexAny(q, `\:`) + 1
+	lower, constant := strings.ToLower(q), strings.ToLower(q[:i])+q[i:]
+	syms, err := ix.symbols(`d.lname = ?`, lower[i:])
+	var out []agentlsp.Symbol
+	for _, s := range syms {
+		want, qualified := lower, facts.Qualified(s.key) // in lower case but for the names of constants
+		if s.Kind == agentlsp.KindConst || s.Kind == agentlsp.KindClassConst {
+			want = constant
+		}
+		if qualified == want || strings.HasSuffix(qualified, `\`+want) || strings.HasSuffix(qualified, "::"+want) {
+			out = append(out, s.Symbol)
+		}
+	}
+	return out, err
 }
 
-// Outline is not supported.
+// Outline is the declarations of a .php file of the root in the order of their ranges: classes, interfaces, traits
+// and enums with their methods and constants, functions and constants. A file that is not a file of the root is an
+// error; a file of the root that is not indexed has none.
 func (ix *Index) Outline(file string) ([]agentlsp.Symbol, error) {
-	return nil, fmt.Errorf("php: outline: %w", agentlsp.ErrNotSupported)
+	rel, err := ix.place(agentlsp.Position{File: file, Line: 1, Column: 1})
+	if err != nil {
+		return nil, fmt.Errorf("php: outline %s: %w", file, err)
+	}
+	rows, err := ix.db.Query(`SELECT f.root, f.path, d.key, d.kind, d.name, d.container, d.sl, d.sc, d.el, d.ec,
+		d.rsl, d.rsc, d.rel, d.rec, d.signature, d.doc FROM php1_files f
+		JOIN php1_facts x ON x.hash = f.hash AND x.salt = ? JOIN php1_decls d ON d.facts = x.id
+		WHERE f.root = ? AND f.path = ? ORDER BY d.rsl, d.rsc, d.sl, d.sc`, ix.salt, ix.root, rel)
+	syms, err := ix.scanSymbols(rows, err)
+	var out []agentlsp.Symbol
+	for _, s := range syms {
+		out = append(out, s.Symbol)
+	}
+	return out, err
 }
 
-// symbolAt is the key of the Symbol a link at pos points to or that is declared at pos; "" when there is none.
+// keyedSymbol is a Symbol with its key.
+type keyedSymbol struct {
+	agentlsp.Symbol
+	key string
+}
+
+// symbols is the declarations in the root and the stubs that satisfy cond with arg, those of the root first.
+func (ix *Index) symbols(cond, arg string) ([]keyedSymbol, error) {
+	rows, err := ix.db.Query(`SELECT f.root, f.path, d.key, d.kind, d.name, d.container, d.sl, d.sc, d.el, d.ec,
+		d.rsl, d.rsc, d.rel, d.rec, d.signature, d.doc FROM php1_decls d
+		JOIN php1_facts x ON x.id = d.facts JOIN php1_files f ON f.hash = x.hash
+		WHERE `+cond+` AND x.salt = ? AND f.root IN (?, ?) ORDER BY f.root = ?, f.path, d.sl, d.sc`,
+		arg, ix.salt, ix.root, ix.stubs, ix.stubs)
+	return ix.scanSymbols(rows, err)
+}
+
+func (ix *Index) scanSymbols(rows *sql.Rows, err error) ([]keyedSymbol, error) {
+	if err != nil {
+		return nil, ix.db.Err(err)
+	}
+	defer rows.Close()
+	var out []keyedSymbol
+	for rows.Next() {
+		var root, p string
+		var s keyedSymbol
+		n, r := &s.Location, &s.Range
+		if err := rows.Scan(&root, &p, &s.key, &s.Kind, &s.Name, &s.Container, &n.Line, &n.Column, &n.EndLine,
+			&n.EndColumn, &r.Line, &r.Column, &r.EndLine, &r.EndColumn, &s.Signature, &s.Doc); err != nil {
+			return nil, ix.db.Err(err)
+		}
+		switch {
+		case root == ix.stubs:
+			s.Origin = agentlsp.OriginStd
+			if n.File, err = stubFile(strings.TrimPrefix(ix.stubs, "stubs:"), p); err != nil {
+				return nil, fmt.Errorf("php: %w", err)
+			}
+		case slices.Contains(strings.Split(p, "/"), "vendor"):
+			s.Origin = agentlsp.OriginVendor
+			n.File = filepath.Join(ix.root, filepath.FromSlash(p))
+		default:
+			n.File = filepath.Join(ix.root, filepath.FromSlash(p))
+		}
+		r.File = n.File
+		out = append(out, s)
+	}
+	return out, ix.db.Err(rows.Err())
+}
+
+// symbolAt is the key of the declaration at pos: the one a link there names, or the one whose name is there;
+// "" when there is none. A link names its key when a declaration has it, otherwise its fallback when one has
+// that.
 func (ix *Index) symbolAt(pos agentlsp.Position) (string, error) {
 	rel, err := ix.place(pos)
 	if err != nil {
 		return "", fmt.Errorf("php: position %s:%d:%d: %w", pos.File, pos.Line, pos.Column, err)
 	}
-	for _, q := range []string{
-		`SELECT l.key FROM links l JOIN files f ON f.id = l.file
-			WHERE f.path = ?1 AND (l.sl, l.sc) <= (?2, ?3) AND (?2, ?3) <= (l.el, l.ec) LIMIT 1`,
-		`SELECT s.key FROM symbols s JOIN files f ON f.id = s.file
-			WHERE f.path = ?1 AND (s.sl, s.sc) <= (?2, ?3) AND (?2, ?3) <= (s.el, s.ec) LIMIT 1`,
-	} {
-		var key string
-		err := ix.db.QueryRow(q, rel, pos.Line, pos.Column).Scan(&key)
-		if errors.Is(err, sql.ErrNoRows) {
+	const file = `FROM php1_files f JOIN php1_facts x ON x.hash = f.hash AND x.salt = ?1`
+	const at = `f.root = ?2 AND f.path = ?3 AND (t.sl, t.sc) <= (?5, ?6) AND (?5, ?6) <= (t.el, t.ec)`
+	rows, err := ix.db.Query(`SELECT t.key, t.fallback `+file+` JOIN php1_links t ON t.facts = x.id WHERE `+at,
+		ix.salt, ix.root, rel, ix.stubs, pos.Line, pos.Column)
+	if err != nil {
+		return "", ix.db.Err(err)
+	}
+	var candidates []string
+	for rows.Next() {
+		var key, fallback string
+		if err := rows.Scan(&key, &fallback); err != nil {
+			rows.Close()
+			return "", ix.db.Err(err)
+		}
+		candidates = append(candidates, key, fallback)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return "", ix.db.Err(err)
+	}
+	for _, key := range candidates {
+		var ok bool
+		if key == "" {
 			continue
 		}
-		return key, err
+		if err := ix.db.QueryRow(`SELECT `+declared(`?3`), ix.salt, ix.root, key, ix.stubs).Scan(&ok); err != nil {
+			return "", ix.db.Err(err)
+		}
+		if ok {
+			return key, nil
+		}
 	}
-	return "", nil
+	var key string
+	err = ix.db.QueryRow(`SELECT t.key `+file+` JOIN php1_decls t ON t.facts = x.id WHERE `+at+` LIMIT 1`,
+		ix.salt, ix.root, rel, ix.stubs, pos.Line, pos.Column).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return key, ix.db.Err(err)
 }
 
 // place is the path of the file of pos relative to the root, with forward slashes, or what makes pos no place in a
@@ -488,23 +699,4 @@ func (ix *Index) place(pos agentlsp.Position) (string, error) {
 	}
 	rel, err := filepath.Rel(ix.root, pos.File)
 	return filepath.ToSlash(rel), err
-}
-
-func (ix *Index) locations(q, key string) ([]agentlsp.Location, error) {
-	rows, err := ix.db.Query(q, key)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []agentlsp.Location
-	for rows.Next() {
-		var p string
-		var l agentlsp.Location
-		if err := rows.Scan(&p, &l.Line, &l.Column, &l.EndLine, &l.EndColumn); err != nil {
-			return nil, err
-		}
-		l.File = filepath.Join(ix.root, filepath.FromSlash(p))
-		out = append(out, l)
-	}
-	return out, rows.Err()
 }

@@ -1,5 +1,8 @@
-// Package facts reads one PHP file into the facts the index stores: method declarations and method calls whose
-// receiver class is known. The rules are those of docs/adr/0001-workspace-index-on-disk.md; in short:
+// Package facts reads one PHP file into the facts the index stores: its declarations (classes, interfaces, traits,
+// enums, functions, constants, methods and class constants) and its links (names of classes, functions and
+// constants resolved by the namespace and the use statements, and method calls whose receiver class is known). The
+// facts depend on the content of the file only. The rules are those of docs/adr/0001-workspace-index-on-disk.md; for
+// method calls, in short:
 // `(new X)->m()` anywhere; `$x->m()` only in a function, method or closure body where every write to `$x` is
 // `new X` of one class, the first of them before the call, and nothing else can bind `$x`; a variable an arrow
 // function or a `use` capture takes is known when the chain of captures, followed outward, comes from such a body.
@@ -18,31 +21,39 @@ import (
 	"github.com/VKCOM/php-parser/pkg/visitor"
 	"github.com/VKCOM/php-parser/pkg/visitor/nsresolver"
 	"github.com/VKCOM/php-parser/pkg/visitor/traverser"
+
+	agentlsp "github.com/hakastein/agent-lsp"
 )
 
-// Method is a method declared in a named class, interface, trait or enum.
-type Method struct {
-	Key  string // MethodKey of the declaring class and the method
-	Name Range  // the method name in the declaration
+// Decl is a declaration of the file. Container is the class of a method or a class constant without its namespace,
+// "" for the others. Signature is the text up to the body of a class-like or a function, the whole text of a method
+// without a body, the first line of the others. Doc is the doc comment that ends on the line before Range or on its
+// line, "" for none.
+type Decl struct {
+	Key       string // the key of the declared name
+	Kind      agentlsp.Kind
+	Name      string
+	Container string
+	NameRange Range
+	Range     Range
+	Signature string
+	Doc       string
 }
 
-// Call is a method call whose receiver class is known: `(new X)->m()`, or `$x->m()` in a function, method or
-// closure body where nothing can bind `$x` to anything but `new X`. It becomes a use only when X declares m.
-type Call struct {
-	Key  string // MethodKey of the receiver class and the called name
-	Name Range  // the method name at the call site
+// Link is a place that names a declaration by its key: a name of a class, a function or a constant, or a method call
+// whose receiver class is known. An unqualified name of a function or a constant in a namespace has a Fallback: the
+// global name PHP takes when the namespace does not declare Key. A link whose Key and Fallback are declared
+// nowhere names nothing.
+type Link struct {
+	Key      string
+	Fallback string
+	Name     Range
 }
 
 // Facts is what one file contributes to the index.
 type Facts struct {
-	Methods []Method
-	Calls   []Call
-}
-
-// MethodKey names a method: the fully qualified class name without the leading backslash and the method name, in
-// lower case, because PHP compares both case-insensitively.
-func MethodKey(class, method string) string {
-	return strings.ToLower(class) + "::" + strings.ToLower(method)
+	Decls []Decl
+	Links []Link
 }
 
 // Parse reads src. A file with syntax errors yields the facts of the tree the parser recovered; the errors are
@@ -60,10 +71,8 @@ func Parse(src []byte) (Facts, []string) {
 		return Facts{}, syntax
 	}
 
-	names := nsresolver.NewNamespaceResolver()
-	traverser.NewTraverser(names).Traverse(root)
-
-	c := &collector{lines: newLines(src), names: names.ResolvedNames}
+	c := &collector{lines: newLines(src), ns: nsresolver.NewNamespace(""), skip: map[ast.Vertex]bool{},
+		kinds: map[ast.Vertex]string{}}
 	traverser.NewTraverser(c).Traverse(root)
 	return c.facts(), syntax
 }
@@ -74,20 +83,18 @@ func Parse(src []byte) (Facts, []string) {
 type collector struct {
 	visitor.Null
 	lines lines
-	names map[ast.Vertex]string
+	ns    *nsresolver.Namespace // the namespace and the use statements in effect where the traversal is
+	skip  map[ast.Vertex]bool   // names that name no declaration: namespace names, names of use statements
+	kinds map[ast.Vertex]string // names of functions and constants; any other name is of a class
 
-	namespaces []namespaceDecl
 	classes    []classDecl
-	methods    []methodDecl
+	decls      []Decl
+	members    []member
+	links      []Link
 	scopes     []*scope
 	events     []event
-	direct     []Call // calls on `new X`: known without a scope
+	direct     []Link // calls on `new X`: known without a scope
 	noPosition bool   // a scope or an event has no position: no variable is known
-}
-
-type namespaceDecl struct {
-	at   int
-	name string
 }
 
 type classDecl struct {
@@ -95,9 +102,10 @@ type classDecl struct {
 	name       string // "" for an anonymous class
 }
 
-type methodDecl struct {
+// member is a method or a class constant at a byte offset: its class is the innermost class-like there.
+type member struct {
 	at   int
-	name *ast.Identifier
+	decl Decl
 }
 
 // event is something at a byte offset that changes or reads what the enclosing scope knows of its variables.
@@ -120,23 +128,29 @@ const (
 )
 
 func (c *collector) facts() Facts {
-	f := Facts{Calls: c.direct}
-	for _, m := range c.methods {
-		if class := c.classAt(m.at); class != "" {
-			f.Methods = append(f.Methods, Method{
-				Key:  MethodKey(class, string(m.name.Value)),
-				Name: c.lines.span(m.name.Position),
-			})
+	f := Facts{Decls: c.decls, Links: append(c.links, c.direct...)}
+	for _, m := range c.members {
+		class := c.classAt(m.at)
+		if class == "" {
+			continue
 		}
+		d := m.decl
+		d.Container = class[strings.LastIndex(class, `\`)+1:]
+		if d.Kind == agentlsp.KindMethod {
+			d.Key = methodKey(class, d.Name)
+		} else {
+			d.Key = classConstKey(class, d.Name)
+		}
+		f.Decls = append(f.Decls, d)
 	}
 	if !c.noPosition {
-		f.Calls = append(f.Calls, c.variableCalls()...)
+		f.Links = append(f.Links, c.variableCalls()...)
 	}
 	return f
 }
 
 // variableCalls places the events in their scopes and returns the calls on variables whose class is known.
-func (c *collector) variableCalls() []Call {
+func (c *collector) variableCalls() []Link {
 	top := &scope{start: 0, end: len(c.lines.src) + 1, top: true, vars: map[string]*binding{}}
 	scopes := append([]*scope{top}, c.scopes...)
 	slices.SortStableFunc(scopes, func(a, b *scope) int {
@@ -171,10 +185,10 @@ func (c *collector) variableCalls() []Call {
 		}
 	}
 	slices.SortFunc(calls, func(a, b event) int { return a.at - b.at })
-	var out []Call
+	var out []Link
 	for _, e := range calls {
 		if class := innermost(scopes, e.at).classOf(e.name, e.at); class != "" {
-			out = append(out, Call{Key: MethodKey(class, e.class), Name: e.call})
+			out = append(out, Link{Key: methodKey(class, e.class), Name: e.call})
 		}
 	}
 	return out
@@ -205,17 +219,6 @@ func (c *collector) classAt(at int) string {
 	return c.classes[best].name
 }
 
-// namespaceAt is the namespace in effect at offset at: that of the last namespace statement starting before it.
-func (c *collector) namespaceAt(at int) string {
-	name, last := "", -1
-	for _, n := range c.namespaces {
-		if n.at <= at && n.at > last {
-			name, last = n.name, n.at
-		}
-	}
-	return name
-}
-
 // event records e at the start of n; a write ends where n ends.
 func (c *collector) event(n ast.Vertex, e event) {
 	p := n.GetPosition()
@@ -227,44 +230,65 @@ func (c *collector) event(n ast.Vertex, e event) {
 	c.events = append(c.events, e)
 }
 
+// The traversal visits a node before its children: a namespace statement before the code it covers.
 func (c *collector) StmtNamespace(n *ast.StmtNamespace) {
 	name := ""
 	if nm, ok := n.Name.(*ast.Name); ok {
 		name = joinParts(nm.Parts)
+		c.skip[nm] = true
 	}
-	if n.Position != nil {
-		c.namespaces = append(c.namespaces, namespaceDecl{at: n.Position.StartPos, name: name})
-	}
+	c.ns = nsresolver.NewNamespace(name)
 }
 
-func (c *collector) StmtClass(n *ast.StmtClass)         { c.class(n, n.Name) }
-func (c *collector) StmtInterface(n *ast.StmtInterface) { c.class(n, n.Name) }
-func (c *collector) StmtTrait(n *ast.StmtTrait)         { c.class(n, n.Name) }
-func (c *collector) StmtEnum(n *ast.StmtEnum)           { c.class(n, n.Name) }
+func (c *collector) StmtClass(n *ast.StmtClass) {
+	c.class(n, n.Name, agentlsp.KindClass, startOf(n.OpenCurlyBracketTkn))
+}
 
-func (c *collector) class(n ast.Vertex, name ast.Vertex) {
+func (c *collector) StmtInterface(n *ast.StmtInterface) {
+	c.class(n, n.Name, agentlsp.KindInterface, startOf(n.OpenCurlyBracketTkn))
+}
+
+func (c *collector) StmtTrait(n *ast.StmtTrait) {
+	c.class(n, n.Name, agentlsp.KindTrait, startOf(n.OpenCurlyBracketTkn))
+}
+
+func (c *collector) StmtEnum(n *ast.StmtEnum) {
+	c.class(n, n.Name, agentlsp.KindEnum, startOf(n.OpenCurlyBracketTkn))
+}
+
+func (c *collector) class(n ast.Vertex, name ast.Vertex, kind agentlsp.Kind, body int) {
 	p := n.GetPosition()
 	if p == nil {
 		return
 	}
 	decl := classDecl{start: p.StartPos, end: p.EndPos}
-	if id, ok := name.(*ast.Identifier); ok {
-		decl.name = string(id.Value)
-		if ns := c.namespaceAt(p.StartPos); ns != "" {
-			decl.name = ns + `\` + decl.name
-		}
+	if d, ok := c.declaration(kind, name, n, body); ok {
+		decl.name = c.qualify(d.Name)
+		d.Key = classKey(decl.name)
+		c.decls = append(c.decls, d)
 	}
 	c.classes = append(c.classes, decl)
 }
 
 func (c *collector) StmtClassMethod(n *ast.StmtClassMethod) {
-	if id, ok := n.Name.(*ast.Identifier); ok && n.Position != nil {
-		c.methods = append(c.methods, methodDecl{at: n.Position.StartPos, name: id})
+	body := -1 // a method without a body: its signature is its whole text
+	if n.Position != nil {
+		body = n.Position.EndPos
 	}
+	if list, ok := n.Stmt.(*ast.StmtStmtList); ok {
+		body = startOf(list.OpenCurlyBracketTkn)
+	}
+	c.member(agentlsp.KindMethod, n.Name, n, body)
 	c.scope(n, &scope{})
 }
 
-func (c *collector) StmtFunction(n *ast.StmtFunction) { c.scope(n, &scope{}) }
+func (c *collector) StmtFunction(n *ast.StmtFunction) {
+	if d, ok := c.declaration(agentlsp.KindFunc, n.Name, n, startOf(n.OpenCurlyBracketTkn)); ok {
+		d.Key = functionKey(c.qualify(d.Name))
+		c.decls = append(c.decls, d)
+	}
+	c.scope(n, &scope{})
+}
 
 func (c *collector) ExprArrowFunction(n *ast.ExprArrowFunction) { c.scope(n, &scope{arrow: true}) }
 
@@ -370,8 +394,9 @@ func (c *collector) ExprRequire(n *ast.ExprRequire)         { c.event(n, event{k
 func (c *collector) ExprRequireOnce(n *ast.ExprRequireOnce) { c.event(n, event{kind: dynamic}) }
 
 // extract, and parse_str or mb_parse_str with one argument, write variables of the current scope by names taken
-// from data.
+// from data. define declares a constant.
 func (c *collector) ExprFunctionCall(n *ast.ExprFunctionCall) {
+	c.kinds[n.Function] = functionRef
 	var parts []ast.Vertex
 	switch f := n.Function.(type) {
 	case *ast.Name:
@@ -397,8 +422,14 @@ func (c *collector) ExprFunctionCall(n *ast.ExprFunctionCall) {
 		if len(n.Args) < 2 || spreads(n.Args) {
 			c.event(n, event{kind: dynamic})
 		}
+	case "define":
+		if len(parts) == 1 {
+			c.define(n)
+		}
 	}
 }
+
+func (c *collector) ExprConstFetch(n *ast.ExprConstFetch) { c.kinds[n.Const] = constRef }
 
 // call records a method call whose receiver is `new X` or a variable.
 func (c *collector) call(receiver, method ast.Vertex) {
@@ -408,7 +439,7 @@ func (c *collector) call(receiver, method ast.Vertex) {
 	}
 	name := c.lines.span(id.Position)
 	if class := c.newClass(receiver); class != "" {
-		c.direct = append(c.direct, Call{Key: MethodKey(class, string(id.Value)), Name: name})
+		c.direct = append(c.direct, Link{Key: methodKey(class, string(id.Value)), Name: name})
 		return
 	}
 	if v := variable(receiver); v != "" && !superglobals[v] {
@@ -435,7 +466,10 @@ func (c *collector) newClass(e ast.Vertex) string {
 	default:
 		return ""
 	}
-	class := c.names[n.Class]
+	class, err := c.ns.ResolveName(n.Class, classRef)
+	if err != nil {
+		return ""
+	}
 	switch strings.ToLower(class) {
 	case "", "self", "static", "parent":
 		return ""

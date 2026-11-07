@@ -82,16 +82,11 @@ func TestMethodReferences(t *testing.T) {
 }
 
 // A caller tells an operation PHP does not answer yet from a failed one by agentlsp.ErrNotSupported.
-func TestOperationsWithoutAnAnswerAreNotSupported(t *testing.T) {
+func TestRenameIsNotSupported(t *testing.T) {
 	cache(t)
 	root := newRoot(t, "methods")
 	ix, _ := open(t, root)
-	at := cartAdd.position(t, root)
-	_, rename := ix.Rename(at, "put")
-	_, symbols := ix.Symbols("add")
-	_, outline := ix.Outline(at.File)
+	_, err := ix.Rename(cartAdd.position(t, root), "put")
 
-	assert.ErrorIs(t, rename, agentlsp.ErrNotSupported)
-	assert.ErrorIs(t, symbols, agentlsp.ErrNotSupported)
-	assert.ErrorIs(t, outline, agentlsp.ErrNotSupported)
+	assert.ErrorIs(t, err, agentlsp.ErrNotSupported)
 }

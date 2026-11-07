@@ -25,9 +25,55 @@ func TestReopenReusesTheIndex(t *testing.T) {
 	assert.Equal(t, wantDefinition, gotDefinition)
 	assert.Equal(t, wantUses, gotUses)
 	assert.NotEmpty(t, gotUses)
-	assert.Contains(t, firstLog, built)
-	assert.Contains(t, secondLog, reused)
-	assert.NotContains(t, secondLog, built)
+	assert.Contains(t, firstLog, indexed(4, 4))
+	assert.Contains(t, secondLog, indexed(4, 0))
+	assert.Regexp(t, `php: stubs: [1-9]\d* files, [1-9]\d* parsed`, firstLog)
+	assert.Regexp(t, `php: stubs: [1-9]\d* files, 0 parsed`, secondLog)
+}
+
+// A second root with the same files, as a second worktree of a project, parses none of them and answers with its
+// own paths.
+func TestSecondRootReusesParsedFiles(t *testing.T) {
+	cache(t)
+	first, second := newRoot(t, "methods"), newRoot(t, "methods")
+	open(t, first)
+	ix, log := open(t, second)
+
+	assert.ElementsMatch(t, locations(t, second, cartAddCalls), uses(t, ix, second, cartAdd))
+	assert.Contains(t, log, indexed(4, 0))
+}
+
+// A root holds composer.json or, as the top of a git checkout or worktree, .git; Open does not look above it.
+func TestOpenNeedsComposerJSONOrGit(t *testing.T) {
+	tests := []struct {
+		name    string
+		arrange func(t *testing.T, root string)
+		want    string // the error after the root; "" for none
+	}{
+		{"composer.json", func(*testing.T, string) {}, ""},
+		{".git directory", func(t *testing.T, root string) {
+			require.NoError(t, os.Remove(filepath.Join(root, "composer.json")))
+			require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+		}, ""},
+		{".git file of a worktree", func(t *testing.T, root string) {
+			require.NoError(t, os.Remove(filepath.Join(root, "composer.json")))
+			require.NoError(t, os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: /elsewhere\n"), 0o600))
+		}, ""},
+		{"neither", func(t *testing.T, root string) {
+			require.NoError(t, os.Remove(filepath.Join(root, "composer.json")))
+		}, "no composer.json or .git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache(t)
+			root := newRoot(t, "methods")
+			tt.arrange(t, root)
+
+			_, _, err := tryOpen(t, root)
+
+			assert.Equal(t, tt.want, after(err, "php: "+root+": "))
+		})
+	}
 }
 
 // Close may be called again; the second call does nothing.
@@ -44,10 +90,11 @@ func TestReopenAfterAChangeAnswersFromTheDisk(t *testing.T) {
 		name   string
 		change func(t *testing.T, root string)
 		want   []place
+		log    string
 	}{
-		{"file changed", appendToApp, append([]place{{"src/app.php", "add('fresh')"}}, cartAddCalls...)},
-		{"file added", addShop, append([]place{{"src/shop.php", "add('added')"}}, cartAddCalls...)},
-		{"file removed", removeCheckout, appCartAddCalls},
+		{"file changed", appendToApp, append([]place{{"src/app.php", "add('fresh')"}}, cartAddCalls...), indexed(4, 1)},
+		{"file added", addShop, append([]place{{"src/shop.php", "add('added')"}}, cartAddCalls...), indexed(5, 1)},
+		{"file removed", removeCheckout, appCartAddCalls, indexed(3, 0)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,7 +107,7 @@ func TestReopenAfterAChangeAnswersFromTheDisk(t *testing.T) {
 			second, log := open(t, root)
 
 			assert.ElementsMatch(t, locations(t, root, tt.want), uses(t, second, root, cartAdd))
-			assert.Contains(t, log, built)
+			assert.Contains(t, log, tt.log)
 		})
 	}
 }
@@ -93,7 +140,7 @@ func TestOpenUnderPathsWithSpecialCharacters(t *testing.T) {
 	ix, log := open(t, root)
 
 	assert.ElementsMatch(t, locations(t, root, cartAddCalls), uses(t, ix, root, cartAdd))
-	assert.Contains(t, log, reused)
+	assert.Contains(t, log, indexed(4, 0))
 }
 
 func appendToApp(t *testing.T, root string) {

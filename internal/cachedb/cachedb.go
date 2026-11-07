@@ -1,7 +1,7 @@
 // Package cachedb opens the cache database of the user: one SQLite file under the user's cache directory that the
-// golang package keeps its tables in (the php package keeps its index in a file of its own per root). A table whose
-// rows carry a "used" column (unix seconds of the last use) is swept: rows not used for MaxAge are deleted along the
-// way, at most once a day.
+// golang and php packages keep their tables in. A table whose rows carry a "used" column (unix seconds of the last
+// use) is swept: rows not used for MaxAge are deleted along the way, at most once a day. Foreign keys are enforced:
+// a row that references a swept row with ON DELETE CASCADE goes with it.
 package cachedb
 
 import (
@@ -114,7 +114,8 @@ func open(file, schema string) (*sql.DB, error) {
 	// A URI with an escaped path: a ? or % in the path is a part of the name, not the start of the query.
 	uri := url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(file), "/")}
 	db, err := sql.Open("sqlite", uri.String()+
-		"?_pragma=busy_timeout(60000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_txlock=immediate")
+		"?_pragma=busy_timeout(60000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)"+
+		"&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}

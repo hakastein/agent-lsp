@@ -66,15 +66,15 @@ func TestUnreadableEntryFailsTheIndex(t *testing.T) {
 			mended, mendedLog := open(t, root)
 
 			assertIndexFailed(t, err, root, tt.path, tt.osError)
-			assert.NotContains(t, failingLog, built)
+			assert.NotContains(t, failingLog, rootLine)
 			assert.ElementsMatch(t, want, uses(t, mended, root, cartAdd))
-			assert.Contains(t, mendedLog, built+"5 files")
+			assert.Contains(t, mendedLog, indexed(5, 5))
 		})
 	}
 }
 
-// A ready index is not reused when an entry cannot be read: without the entry the snapshot cannot be compared.
-// The ready index is built before the entry exists, so skipping the entry would make the snapshot match.
+// A ready index is not reused when an entry cannot be read: without the entry the map of the root cannot be
+// compared. The ready index is built before the entry exists, so skipping the entry would make the map match.
 func TestUnreadableEntryFailsAReadyIndex(t *testing.T) {
 	for _, tt := range unreadableEntries {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,7 +92,7 @@ func TestUnreadableEntryFailsAReadyIndex(t *testing.T) {
 
 			assert.ElementsMatch(t, locations(t, root, cartAddCalls), before)
 			assertIndexFailed(t, err, root, tt.path, tt.osError)
-			assert.NotContains(t, failingLog, reused)
+			assert.NotContains(t, failingLog, rootLine)
 			assert.ElementsMatch(t, want, uses(t, mended, root, cartAdd))
 		})
 	}

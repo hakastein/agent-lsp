@@ -93,6 +93,16 @@ const (
 	KindVar Kind = "var"
 	// KindConst is a constant at the top level.
 	KindConst Kind = "const"
+	// KindClass is a class.
+	KindClass Kind = "class"
+	// KindInterface is an interface.
+	KindInterface Kind = "interface"
+	// KindTrait is a trait.
+	KindTrait Kind = "trait"
+	// KindEnum is an enum.
+	KindEnum Kind = "enum"
+	// KindClassConst is a constant of a class, an interface or an enum, also a case of an enum.
+	KindClassConst Kind = "classconst"
 )
 
 // Symbol is a named declaration: its name, its kind and the declaration that contains it (Container: the type of a
