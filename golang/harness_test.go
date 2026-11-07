@@ -91,6 +91,16 @@ func (p place) location(t *testing.T, root string) agentlsp.Location {
 	return agentlsp.Location{File: path, Line: line, Column: column, EndLine: line, EndColumn: column + word}
 }
 
+// locations is the locations of the identifiers of places; nil for none.
+func locations(t *testing.T, root string, places []place) []agentlsp.Location {
+	t.Helper()
+	var out []agentlsp.Location
+	for _, p := range places {
+		out = append(out, p.location(t, root))
+	}
+	return out
+}
+
 func (p place) position(t *testing.T, root string) agentlsp.Position {
 	t.Helper()
 	l := p.location(t, root)
