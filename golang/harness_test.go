@@ -19,9 +19,17 @@ import (
 // directory and returns the module shop as the root.
 func newRoot(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := tempDir(t)
 	require.NoError(t, os.CopyFS(dir, os.DirFS("testdata")))
 	return filepath.Join(dir, "shop")
+}
+
+// tempDir is t.TempDir by its long name: gopls refuses a root under a Windows short name such as RUNNER~1.
+func tempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	return dir
 }
 
 // symlink makes link point at target. Where the OS does not let the user make symlinks, as on Windows without the

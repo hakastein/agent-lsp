@@ -97,7 +97,7 @@ func TestRenameRefusals(t *testing.T) {
 		want string
 	}{
 		{"name of another method", place{cartGo, "Add(it Item)"}, "Total",
-			"shop/cart/cart.go:30:16:\twould conflict with this method"},
+			filepath.Join("shop", "cart", "cart.go") + ":30:16:\twould conflict with this method"},
 		{"standard library", place{"main.go", "Println"}, "Print", "Println is declared outside the root (std) at "},
 		{"dependency", place{cartGo, "Plus(it.Price)"}, "Add", "Plus is declared outside the root (module) at "},
 		{"interface method, a type of the standard library converted to it", place{datedGo, "Weekday() time"}, "DayOfWeek",

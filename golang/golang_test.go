@@ -119,6 +119,44 @@ func TestDefinitionInVendor(t *testing.T) {
 	}}), got)
 }
 
+// A go.work in the working directory of the process is not of the root, though on Windows the drive-relative path
+// C:go.work, on the drive of the root, names that file.
+func TestDefinitionFromAnotherWorkingDirectory(t *testing.T) {
+	cache(t)
+	testdata := filepath.Dir(newRoot(t))
+	t.Chdir(filepath.Join(testdata, "elsewhere")) // a module with a go.work of its own beside the roots
+
+	tests := []struct {
+		name string
+		root string // under testdata
+		at   place
+		want decl
+	}{
+		{"vendor directory", "vendored", place{"main.go", "Amount(300)"}, decl{
+			name: place{"vendor/example.com/money/money.go", "Amount int64"}, from: "type Amount int64", to: "type Amount int64",
+			signature: "type Amount int64", doc: "// Amount is a sum in cents.", origin: agentlsp.OriginVendor,
+		}},
+		{"directory a replace names", "shop", place{cartGo, "Plus(it.Price)"}, decl{
+			name: place{"../money/money.go", "Plus(b Amount)"}, from: "func (a Amount) Plus", to: "return a + b }",
+			signature: "func (a Amount) Plus(b Amount) Amount", doc: "// Plus is the sum of a and b.", origin: agentlsp.OriginModule,
+		}},
+	}
+	got := make([][]agentlsp.Declaration, len(tests))
+	errs := make([]error, len(tests))
+	for i, tt := range tests {
+		root := filepath.Join(testdata, tt.root)
+		session(t, root, func(ix *golang.Index) {
+			got[i], errs[i] = ix.Definition(tt.at.position(t, root))
+		})
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, errs[i])
+			assert.Equal(t, declarations(t, filepath.Join(testdata, tt.root), []decl{tt.want}), got[i])
+		})
+	}
+}
+
 // A file changed on disk while the index is open is read as it is now: a byte that is not UTF-8 right after the
 // package clause leaves the parser no declaration, and the place gopls gives is a declaration of itself.
 func TestDefinitionInFileChangedWhileOpen(t *testing.T) {
@@ -546,7 +584,7 @@ func TestLoadOfAnotherPlatformIsNotReused(t *testing.T) {
 // files by their paths through the root as Open got it, the paths the positions use.
 func TestSymlinkedRoot(t *testing.T) {
 	cache(t)
-	root := filepath.Join(t.TempDir(), "shop")
+	root := filepath.Join(tempDir(t), "shop")
 	symlink(t, newRoot(t), root)
 	session(t, root, func(*golang.Index) {})
 	require.NoError(t, os.WriteFile(filepath.Join(root, "cart", "extra.go"), []byte("package cart\n\nfunc Extra() {}\n"), 0o600))

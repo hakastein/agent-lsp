@@ -1124,8 +1124,8 @@ func findRootPattern(ctx context.Context, dirURI protocol.DocumentURI, basename 
 		if fileExists(fh) {
 			return uri, nil
 		}
-		// Trailing separators must be trimmed, otherwise filepath.Split is a noop.
-		next, _ := filepath.Split(strings.TrimRight(dir, string(filepath.Separator)))
+		// the parent of a volume root such as C:\ is itself, not the drive-relative C: of the working directory
+		next := filepath.Dir(dir)
 		if next == dir {
 			break
 		}

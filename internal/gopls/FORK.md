@@ -61,7 +61,10 @@
   до `Flush`, ключ строки включает соль; `GetOrFatal` не завершает процесс, ошибка чтения — промах. Сборщика мусора
   по файлам нет: старые строки удаляет `internal/cachedb`.
 - `cache/view.go`: поле `Folder.Load` — замена `packages.Load` для загрузок папки; поле `GoEnv.GOENV` — файл настроек
-  `go env -w`, `FetchGoEnv` спрашивает его тем же вызовом `go env`.
+  `go env -w`, `FetchGoEnv` спрашивает его тем же вызовом `go env`. `findRootPattern` поднимается к родителю через
+  `filepath.Dir`: upstream режет путь по последнему разделителю и из корня тома `C:\` получает `C:` — путь от рабочего
+  каталога процесса на этом диске, и `go.work` или `go.mod` рабочего каталога становится файлом корня, а корень
+  представления — рабочим каталогом.
 - `cache/load.go`: `Snapshot.load` вызывает `Folder.Load`, если оно задано.
 - `cache/errors.go`: удалена `toSourceDiagnostic` (нужна только `cache/analysis.go`).
 - `cache/session.go`: представление создаётся без `modcacheState`: индекс кэша модулей для автодополнения
