@@ -282,22 +282,7 @@ func (i *Invocation) run(ctx context.Context, stdout, stderr io.Writer) error {
 		i.logf("%s for %v", time.Since(start), debugStr)
 	}()
 
-	err := runCmdContext(ctx, cmd)
-	if os.Getenv("AGENTLSP_DBG") != "" { // DEBUG
-		wd, _ := os.Getwd()
-		se := ""
-		if b, ok := stderr.(*bytes.Buffer); ok {
-			se = b.String()
-		}
-		var env []string
-		for _, kv := range cmd.Env {
-			if strings.HasPrefix(kv, "=") || strings.HasPrefix(kv, "GO") || strings.HasPrefix(kv, "PWD") {
-				env = append(env, kv)
-			}
-		}
-		fmt.Fprintf(os.Stderr, "DBG go %q dir=%q path=%q wd=%q err=%v env=%q stderr=%q\n", goArgs, cmd.Dir, cmd.Path, wd, err, env, se)
-	}
-	return err
+	return runCmdContext(ctx, cmd)
 }
 
 // DebugHangingGoCommands may be set by tests to enable additional
