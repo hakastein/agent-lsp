@@ -28,6 +28,7 @@ pos := agentlsp.Position{File: "/abs/path/cart/cart.go", Line: 12, Column: 9}
 decls, err := ix.Definition(pos)          // []agentlsp.Declaration
 syms, err := ix.Symbols("cart.Cart.Add")  // []agentlsp.Symbol
 refs, err := ix.References(pos)           // refs.Uses, refs.Implementations, refs.Unresolved
+ren, err := ix.Rename(pos, "Put")         // ren.Edits, ren.Unresolved
 ```
 
 | Method | Answer |
@@ -74,8 +75,8 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
 
 - The packages of the root are loaded for each of `linux`, `darwin` and `windows`, whatever `GOOS` the environment
   sets (`GOARCH` is the one of the environment), so a file built for one of them only, such as `x_windows.go`, is
-  answered about. A `.go` file none of them builds (another `GOOS`, a build tag) is an error of `Definition` and
-  `References`.
+  answered about. A `.go` file none of them builds (another `GOOS`, a build tag) is an error of `Definition`,
+  `References` and `Rename`.
 - `Definition` resolves by types, also into the standard library and dependencies; locals, parameters, fields,
   interface methods and labels are declarations too. It answers as the first of the three platforms that builds
   the file.
@@ -87,12 +88,29 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
   methods that implement an interface type or a method of one; for a concrete type or method that list is empty. The
   declaration itself is not a use, and a question on a use and on the declaration gets the same answer. The answers
   of the three platforms are joined: a platform that builds the file of the question is asked there, another one at
-  the declaration of the symbol; a place more than one of them sees is in the answer once. Locations come in the
-  order of files, lines and columns. `Unresolved` is empty: every identifier is resolved by types.
-- A symbol declared for each platform apart (`f` in `f_unix.go` and in `f_windows.go`) is a symbol of each: a
-  question in a file all three build finds the uses of every one, a question on one of the declarations the uses of
-  that one.
-- `Rename` is not supported.
+  its own declaration of the symbol, matched by the package, the type it is declared in (for a method or a field) and
+  the name; a place more than one of them sees is in the answer once. Locations come in the order of files, lines
+  and columns. `Unresolved` is empty: every identifier is resolved by types.
+- A symbol declared for each platform apart (`f` in `f_unix.go` and in `f_windows.go`, a method or a field of such a
+  type) is one symbol: a question on any of its declarations finds the uses of all of them, and `Rename` renames all
+  of them. A field or method of a type without a name at the package level (`var cfg struct{ n int }` in `x_unix.go`
+  and in `x_windows.go`) is found this way only from a file every platform builds.
+- `Rename` gives the edits that rename the symbol in the packages of the root for all three platforms, joined as
+  `References` joins its answers: an edit more than one platform makes is in the answer once. Edits come in the order
+  of files, lines and columns and include the name in doc comments. Renaming a method of an interface renames the
+  methods of the types the code converts to the interface, as gopls does; a type that implements the interface and is
+  never converted to it keeps its method. `Rename` writes nothing; `Unresolved` is empty.
+- `Rename` refuses with an error that names the place: a new name that conflicts with another symbol (the places
+  gopls reports, with full paths), a symbol declared outside the root (`std`, `module`, `vendor`; the place of the
+  declaration), a method of a type the code converts to the interface whose method is renamed, declared in a package
+  that does not import the package of the interface (`time.Time` converted to an interface of the root, a type of the
+  root converted to it only in a third package; the place of the method), a field or
+  method of a type without a name at the package level asked from a file not every platform builds (the place of the
+  question), a method `fmt` finds through `any` — `String() string`, `Error() string`, `Format(fmt.State, rune)` of a
+  concrete type, renamed alone or with an interface method (the place of the method): the type would print otherwise
+  and `go vet` would fail on the verbs it served. Renaming a package, at its `package` clause or at an import name,
+  fails with `agentlsp.ErrNotSupported`.
+  Files none of the three platforms builds, such as `x_plan9.go` or a `//go:build ignore` program, are not edited.
 - A process has one Go index open at a time: `Open` fails until the open one is closed.
 
 ### The cache
@@ -137,6 +155,17 @@ processes keeping the load average at 8–11, on `golang.org/x/tools` v0.47.0. I
 `References` of the interface type `ssa.Value` of `golang.org/x/tools` (292 uses, 33 implementations): 3.3 s on the
 first call, 0.49–0.74 s on the next ones. With two worktrees of the gopls module the cache file is 13 MB after the
 `Definition` calls above and 37 MB after the `References` calls.
+
+`Rename` in the module `golang.org/x/tools`, same machine, load average 6–12, a new process each time:
+
+| Rename | Edits | First call, empty cache | Next call: process (`Rename` alone) |
+|---|---|---|---|
+| `Load` in `go/packages/packages.go` | 160 in 48 files | 1.34 s | 0.26–0.29 s (0.17–0.19 s) |
+| `getFileID` of `internal/robustio`, declared in `robustio_posix.go` and `robustio_windows.go` | 3 in 3 files | 0.85 s | 0.13 s (0.05 s) |
+| the interface method `ssa.Member.Token` and its 4 implementations | 5 in 1 file | 1.18 s | 0.32–0.39 s (0.22–0.29 s) |
+
+With the edits of all three made, the module builds and passes `go vet ./...` for linux, darwin and windows;
+`robustio_plan9.go` keeps the old name of `getFileID`, as plan9 is not one of the platforms.
 
 ## PHP
 

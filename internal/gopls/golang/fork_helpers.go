@@ -9,31 +9,11 @@
 package golang
 
 import (
-	"context"
 	pathpkg "path"
 	"regexp"
 	"slices"
 	"strings"
-
-	"github.com/hakastein/agent-lsp/internal/gopls/cache"
-	"github.com/hakastein/agent-lsp/internal/gopls/cache/parsego"
-	"github.com/hakastein/agent-lsp/internal/gopls/file"
-	"github.com/hakastein/agent-lsp/internal/gopls/protocol"
-	"github.com/hakastein/agent-lsp/internal/gopls/xtools/astutil"
 )
-
-// rename.go
-
-func parsePackageNameDecl(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng protocol.Range) (*parsego.File, bool, error) {
-	pgf, err := snapshot.ParseGo(ctx, fh, parsego.Header)
-	if err != nil {
-		return nil, false, err
-	}
-	// Careful: because we used parsego.Header,
-	// pgf.Pos(ppos) may be beyond EOF => (0, err).
-	start, end, _ := pgf.RangePos(rng)
-	return pgf, astutil.NodeContains(pgf.File.Name, astutil.RangeOf(start, end)), nil
-}
 
 // semtok.go
 

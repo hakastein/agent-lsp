@@ -165,15 +165,11 @@ func TestFileOfNoPlatform(t *testing.T) {
 }
 
 // References joins the answers of linux, darwin and windows: a use or an implementation in a file one of them builds
-// is in it, a place all of them see is in it once. The answer is the same from a use and from the declaration.
+// is in it, a place all of them see is in it once. The answer is the same from a use and from the declaration. A
+// symbol declared for the platforms apart is one symbol: the uses of every declaration are in the answer.
 func TestReferences(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
-	const (
-		listGo     = "cart/list.go"
-		discountGo = "cart/discount_windows.go"
-		restockGo  = "cart/restock_darwin.go"
-	)
 	addCalls := []place{{discountGo, "Add(it)"}, {restockGo, "Add(c.Items[0])"}, {"main.go", "Add(cart.Item"}}
 	priceCalls := []place{{discountGo, "Price(it)"}, {listGo, "Price(it)"}}
 
@@ -189,11 +185,13 @@ func TestReferences(t *testing.T) {
 		{"call in a file built for darwin only", place{restockGo, "Add(c.Items[0])"}, addCalls, nil},
 		{"interface method", place{cartGo, "Price(it Item)"}, priceCalls,
 			[]place{{discountGo, "Price(it Item)"}, {listGo, "Price(it Item)"}}},
-		{"interface type", place{cartGo, "Pricer interface"}, []place{{discountGo, "Pricer, it"}, {listGo, "Pricer, it"}},
+		{"interface type", place{cartGo, "Pricer interface"}, []place{{discountGo, "Pricer, it"}, {listGo, "Pricer, it"}, {pricersGo, "Pricer{List"}},
 			[]place{{discountGo, "Discount struct{}"}, {listGo, "List struct{}"}}},
 		{"method of a concrete type", place{listGo, "Price(it Item)"}, priceCalls, nil},
 		{"field", place{cartGo, "Items []Item"}, []place{{cartGo, "Items = append"}, {cartGo, "Items, it)"},
 			{cartGo, "Items))"}, {restockGo, "Items[0]"}, {"main.go", "Items, basket"}}, nil},
+		{"function declared for the platforms apart", place{storeOtherGo, "store(c *Cart"},
+			[]place{{saveGo, "store(c, c.path())"}, {storeWindowsGo, "store(c, c.path()+"}}, nil},
 		{"whitespace", place{"main.go", "\tbasket.Add"}, nil, nil},
 	}
 	var got []agentlsp.References
@@ -471,16 +469,6 @@ func TestOpenMakesNoGoimportsDirectory(t *testing.T) {
 	require.NoError(t, err, "%s", out)
 	assert.DirExists(t, filepath.Join(dir, "agent-lsp"))
 	assert.NoDirExists(t, filepath.Join(dir, "goimports"))
-}
-
-func TestNotSupported(t *testing.T) {
-	cache(t)
-	root := newRoot(t)
-	var renameErr error
-	session(t, root, func(ix *golang.Index) {
-		_, renameErr = ix.Rename(place{"main.go", "Add(cart.Item"}.position(t, root), "Put")
-	})
-	assert.ErrorIs(t, renameErr, agentlsp.ErrNotSupported)
 }
 
 // The gopls cache is global to the process: a second Open while an index is open fails.
