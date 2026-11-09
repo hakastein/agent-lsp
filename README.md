@@ -114,9 +114,16 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
   method of a type without a name at the package level asked from a file not every platform builds (the place of the
   question), a method `fmt` finds through `any` — `String() string`, `Error() string`, `Format(fmt.State, rune)` of a
   concrete type, renamed alone or with an interface method (the place of the method): the type would print otherwise
-  and `go vet` would fail on the verbs it served. Renaming a package, at its `package` clause or at an import name,
-  fails with `agentlsp.ErrNotSupported`.
-  Files none of the three platforms builds, such as `x_plan9.go` or a `//go:build ignore` program, are not edited.
+  and `go vet` would fail on the verbs it served; the old name used in `.go` files of the root none of the three
+  platforms builds — another `GOOS` or `GOARCH` (`x_plan9.go`), a build tag (`//go:build integration`), a
+  `//go:build ignore` program, a directory none of whose files the platforms build — as gopls does not see them and
+  they would keep it (each such file with the place of its first use, `path:line:column`). A use there is an
+  identifier, not a word of a comment or a string, in a file that can name the symbol: a file of its package (same
+  directory and `package` name) or a file that imports the package, where a symbol at the package level counts only as
+  `import.Name`. Files are those `./...` of each module of the root finds (no `testdata`, `vendor`, directories
+  starting with `.` or `_`, nested modules); a `package main` generator with a symbol of its own name does not stop the
+  renaming. A field or method named through a value in a file that does not import its package is not found.
+  Renaming a package, at its `package` clause or at an import name, fails with `agentlsp.ErrNotSupported`.
 - A process has one Go index open at a time: `Open` fails until the open one is closed.
 
 ### The cache
@@ -162,16 +169,16 @@ processes keeping the load average at 8–11, on `golang.org/x/tools` v0.47.0. I
 first call, 0.49–0.74 s on the next ones. With two worktrees of the gopls module the cache file is 13 MB after the
 `Definition` calls above and 37 MB after the `References` calls.
 
-`Rename` in the module `golang.org/x/tools`, same machine, load average 6–12, a new process each time:
+`Rename` in the module `golang.org/x/tools`, same machine, load average 8–10, a new process each time:
 
 | Rename | Edits | First call, empty cache | Next call: process (`Rename` alone) |
 |---|---|---|---|
-| `Load` in `go/packages/packages.go` | 160 in 48 files | 1.34 s | 0.26–0.29 s (0.17–0.19 s) |
-| `getFileID` of `internal/robustio`, declared in `robustio_posix.go` and `robustio_windows.go` | 3 in 3 files | 0.85 s | 0.13 s (0.05 s) |
-| the interface method `ssa.Member.Token` and its 4 implementations | 5 in 1 file | 1.18 s | 0.32–0.39 s (0.22–0.29 s) |
+| `Load` in `go/packages/packages.go` | refused: four `//go:build ignore` programs call `packages.Load` | 1.09 s | 0.12–0.13 s (0.03–0.04 s) |
+| `getFileID` of `internal/robustio`, declared in `robustio_posix.go` and `robustio_windows.go` | refused: `robustio_plan9.go` declares it too | 0.78 s | 0.11–0.12 s (0.03–0.04 s) |
+| the interface method `ssa.Member.Name` and the methods of the types converted to it | 99 in 25 files | 1.49 s | 0.39–0.40 s (0.27–0.30 s) |
+| the interface method `ssa.Member.Token` and its 4 implementations | 5 in 1 file | 1.48 s | 0.34–0.40 s (0.25–0.30 s) |
 
-With the edits of all three made, the module builds and passes `go vet ./...` for linux, darwin and windows;
-`robustio_plan9.go` keeps the old name of `getFileID`, as plan9 is not one of the platforms.
+With the edits of both renamings made, the module builds and passes `go vet ./...` for linux, darwin and windows.
 
 ## PHP
 

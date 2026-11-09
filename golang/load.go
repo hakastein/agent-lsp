@@ -229,7 +229,7 @@ func (l *loader) walk(dir string) ([]header, error) {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if p != top && (name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+			if p != top && skipped(name) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -291,6 +291,11 @@ func (l *loader) walk(dir string) ([]header, error) {
 		return nil, err
 	}
 	return out, tx.Commit()
+}
+
+// skipped reports whether the go command skips a directory or a .go file of this name under a pattern "dir/...".
+func skipped(name string) bool {
+	return name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
 }
 
 // goHeader hashes what a load reads from a .go file: its build constraints, its package name and its imports. A

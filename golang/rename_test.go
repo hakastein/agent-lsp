@@ -64,6 +64,8 @@ func TestRename(t *testing.T) {
 			{saveGo, "path())"}, {storeOtherGo, "path is the file"}, {storeOtherGo, "path() string"},
 			{storeWindowsGo, "path is the file"}, {storeWindowsGo, "path() string"}, {storeWindowsGo, "path()+"},
 		}},
+		{"files no platform builds without the name: in a comment, a string, another package, not after the import name",
+			place{cartGo, "MinItems = 0"}, "Least", []place{{cartGo, "MinItems = 0"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,7 +87,7 @@ func TestRename(t *testing.T) {
 
 // Rename refuses what it cannot rename whole: a name taken in the scope, a symbol declared outside the root, a type
 // outside the root converted to the interface, a method fmt finds through any, a field another platform declares
-// where Rename cannot find it.
+// where Rename cannot find it, a name used in files no platform builds.
 func TestRenameRefusals(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
@@ -106,6 +108,12 @@ func TestRenameRefusals(t *testing.T) {
 			"renaming this method \"String\" to \"Describe\" would make *example.com/shop/cart.Cart no longer implement fmt.Stringer"},
 		{"field of a struct type without a name, from a file not every platform builds", place{storeWindowsGo, "count int"},
 			"n", "count is a field or method of a type without a name at the package level, in a file not every platform builds"},
+		{"constant used in a test under a tag and in a program of a directory no platform builds", place{cartGo, "MaxItems = 100"},
+			"Most", "MaxItems is in files none of linux, darwin, windows builds, which the renaming would not edit: " +
+				filepath.Join(root, "cart", "limits_integration_test.go") + ":9:5, " + filepath.Join(root, "report", "report.go") + ":10:15"},
+		{"method used in a program no platform builds", place{cartGo, "Total() money"}, "Sum",
+			"Total is in files none of linux, darwin, windows builds, which the renaming would not edit: " +
+				filepath.Join(root, "report", "report.go") + ":10:50"},
 	}
 	errs := make([]error, len(tests))
 	session(t, root, func(ix *golang.Index) {
