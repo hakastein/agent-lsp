@@ -609,8 +609,8 @@ func compareLocations(a, b agentlsp.Location) int {
 // renamed with the methods gopls couples to it, those of the types converted to the interface. Rename writes nothing.
 // An edit made under more than one platform is in the answer once. Edits come in the order of files, lines and
 // columns. A name that conflicts with another symbol is an error that names the place, as is a symbol declared outside
-// the root (the standard library, a dependency, a vendored copy), a method coupled to the renamed one in a package the
-// renaming does not reach, a method fmt finds through any (String, Error, Format), and, asked from a file not every
+// the root (the standard library, a dependency, a vendored copy), a method coupled to the renamed one in a package that
+// does not import the package of the declaration, a method fmt finds through any (String, Error, Format), and, asked from a file not every
 // platform builds, a field or method of a type without a name at the package level; a package is not supported.
 // Unresolved is empty, as in References. Its answer to a place where no symbol is and its errors on a position are
 // those of Definition.

@@ -845,10 +845,11 @@ func renameExported(pkgs []*cache.Package, declPkgPath PackagePath, declObjPath 
 
 		// Expand the search set?
 		for obj := range moreObjects {
-			// A package visited before or not at all keeps the old name of obj and stops compiling.
+			// (agent-lsp fork: a package visited before or not at all keeps the old name of obj and stops compiling;
+			// see FORK.md.)
 			if !slices.ContainsFunc(pkgs[i:], func(p *cache.Package) bool { return string(p.Metadata().PkgPath) == obj.Pkg().Path() }) {
-				return nil, fmt.Errorf("%s: %s must be renamed too, but the renaming does not reach its package",
-					pkg.FileSet().Position(obj.Pos()), obj)
+				return nil, fmt.Errorf("%s: %s must be renamed too, but the renaming edits only %s and the packages that import it",
+					pkg.FileSet().Position(obj.Pos()), obj, declPkgPath)
 			}
 			objpath, err := objectpath.For(obj)
 			if err != nil {

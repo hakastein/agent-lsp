@@ -101,7 +101,7 @@ func TestRenameRefusals(t *testing.T) {
 		{"standard library", place{"main.go", "Println"}, "Print", "Println is declared outside the root (std) at "},
 		{"dependency", place{cartGo, "Plus(it.Price)"}, "Add", "Plus is declared outside the root (module) at "},
 		{"interface method, a type of the standard library converted to it", place{datedGo, "Weekday() time"}, "DayOfWeek",
-			"func (time.Time).Weekday() time.Weekday must be renamed too, but the renaming does not reach its package"},
+			"func (time.Time).Weekday() time.Weekday must be renamed too, but the renaming edits only example.com/shop/cart and the packages that import it"},
 		{"method fmt looks for", place{cartGo, "String() string {"}, "Describe",
 			"renaming this method \"String\" to \"Describe\" would make *example.com/shop/cart.Cart no longer implement fmt.Stringer"},
 		{"field of a struct type without a name, from a file not every platform builds", place{storeWindowsGo, "count int"},

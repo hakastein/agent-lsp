@@ -103,7 +103,8 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
 - `Rename` refuses with an error that names the place: a new name that conflicts with another symbol (the places
   gopls reports, with full paths), a symbol declared outside the root (`std`, `module`, `vendor`; the place of the
   declaration), a method of a type the code converts to the interface whose method is renamed, declared in a package
-  the renaming does not reach (`time.Time` converted to an interface of the root; the place of the method), a field or
+  that does not import the package of the interface (`time.Time` converted to an interface of the root, a type of the
+  root converted to it only in a third package; the place of the method), a field or
   method of a type without a name at the package level asked from a file not every platform builds (the place of the
   question), a method `fmt` finds through `any` — `String() string`, `Error() string`, `Format(fmt.State, rune)` of a
   concrete type, renamed alone or with an interface method (the place of the method): the type would print otherwise
