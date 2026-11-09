@@ -37,7 +37,7 @@ import (
 
 // forkVersion names the gopls the fork is taken from and the revision of the fork's changes; see
 // internal/gopls/FORK.md. A new revision is a new name.
-const forkVersion = "gopls v0.23.0 fork 1"
+const forkVersion = "gopls v0.23.0 fork 2"
 
 // salt enters every key of the cache: the schema of the Go tables, the fork, and the Go version the binary is built
 // with, whose go/types type-checks. A value written by another build of either is never read.
