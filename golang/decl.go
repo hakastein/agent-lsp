@@ -15,11 +15,12 @@ import (
 type source struct {
 	path string
 	src  []byte
-	// tok holds the positions of file. Its Offset takes a position past the end of the file for the end: the parser
-	// ends a node the file cuts short, such as a function without its closing parenthesis, past it.
+	// tok turns the positions of file into offsets; its Offset takes a position past the end of the file for the end:
+	// the parser ends a node the file cuts short, such as a function without its closing parenthesis, past it. Its
+	// lines end where the parser stopped, such as at an error in the package clause: m gives every line and column.
 	tok *token.File
-	// m gives the lines and columns of offsets, as for the places gopls gives; unlike tok, also of the end of a file
-	// that ends with a line break: the start of the line after it.
+	// m gives the lines and columns of offsets in src, as for the places gopls gives, also of the end of a file that
+	// ends with a line break: the start of the line after it.
 	m    *protocol.Mapper
 	file *ast.File
 }
@@ -166,8 +167,8 @@ func (s source) definition(pos token.Pos) (agentlsp.Declaration, bool) {
 
 // contains reports whether the name at l covers pos.
 func (s source) contains(l agentlsp.Location, pos token.Pos) bool {
-	p := s.tok.Position(pos)
-	return l.Line == p.Line && l.Column <= p.Column && p.Column <= l.EndColumn
+	line, column := s.m.OffsetLineCol8(s.tok.Offset(pos))
+	return l.Line == line && l.Column <= column && column <= l.EndColumn
 }
 
 // funcSignature is the text of a function declaration without its body.
