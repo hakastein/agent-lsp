@@ -93,6 +93,7 @@ func (l *loader) load(cfg *packages.Config, patterns ...string) (_ []*packages.P
 
 func (l *loader) fresh(cfg *packages.Config, patterns []string) ([]*packages.Package, error) {
 	pkgs, err := packages.Load(cfg, patterns...)
+	dbgPkgs(cfg, patterns, pkgs, err) // DEBUG
 	l.loaded += len(pkgs)
 	return pkgs, err
 }
