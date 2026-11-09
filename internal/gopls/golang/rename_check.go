@@ -738,6 +738,14 @@ func (r *renamer) checkMethod(from *types.Func) {
 	} else {
 		// Concrete method
 
+		// (agent-lsp fork: fmt finds these methods through any, so a type that loses one prints otherwise and go vet
+		// fails on a verb it served; see FORK.md.)
+		if iface := fmtInterface(from); iface != "" {
+			r.errorf(from.Pos(), "renaming this method %q to %q would make %s no longer implement %s",
+				from.Name(), r.to, R, iface)
+			return
+		}
+
 		// declaration
 		prev, indices, _ := types.LookupFieldOrMethod(R, true, from.Pkg(), r.to)
 		if prev != nil && len(indices) == 1 {
@@ -823,6 +831,22 @@ func (r *renamer) checkExport(id *ast.Ident, pkg *types.Package, from types.Obje
 		return false
 	}
 	return true
+}
+
+// fmtInterface is the interface of fmt or the error type that fn is the method of, "" for none.
+func fmtInterface(fn *types.Func) string {
+	in, out := fn.Signature().Params(), fn.Signature().Results()
+	stringer := in.Len() == 0 && out.Len() == 1 && types.Identical(out.At(0).Type(), types.Typ[types.String])
+	switch {
+	case fn.Name() == "String" && stringer:
+		return "fmt.Stringer"
+	case fn.Name() == "Error" && stringer:
+		return "error"
+	case fn.Name() == "Format" && in.Len() == 2 && out.Len() == 0 && in.At(0).Type().String() == "fmt.State" &&
+		types.Identical(in.At(1).Type(), types.Typ[types.Int32]):
+		return "fmt.Formatter"
+	}
+	return ""
 }
 
 // satisfy returns the set of interface satisfaction constraints.

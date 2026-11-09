@@ -8,3 +8,6 @@ func (c *Cart) path() string { return `C:\cart` }
 
 // backup keeps c in a second file.
 func backup(c *Cart) error { return store(c, c.path()+".bak") }
+
+// saved counts the saves.
+var saved struct{ count int }

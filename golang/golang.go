@@ -605,12 +605,15 @@ func compareLocations(a, b agentlsp.Location) int {
 }
 
 // Rename is the edits that rename the symbol at pos to name in the packages of the root, joined over the platforms
-// as targets says: a symbol declared for the platforms apart is renamed in every declaration, and an interface method
-// with the methods that implement it. Rename writes nothing. An edit made under more than one platform is in the
-// answer once; edits that differ and overlap are an error. Edits come in the order of files, lines and columns.
-// A name that conflicts with another symbol is an error that names the place, as is a symbol declared outside the
-// root (the standard library, a dependency, a vendored copy); a package is not supported. Unresolved is empty, as in
-// References. Its answer to a place where no symbol is and its errors on a position are those of Definition.
+// as targets says: a symbol declared for the platforms apart is renamed in every declaration. An interface method is
+// renamed with the methods gopls couples to it, those of the types converted to the interface. Rename writes nothing.
+// An edit made under more than one platform is in the answer once. Edits come in the order of files, lines and
+// columns. A name that conflicts with another symbol is an error that names the place, as is a symbol declared outside
+// the root (the standard library, a dependency, a vendored copy), a method coupled to the renamed one in a package the
+// renaming does not reach, a method fmt finds through any (String, Error, Format), and, asked from a file not every
+// platform builds, a field or method of a type without a name at the package level; a package is not supported.
+// Unresolved is empty, as in References. Its answer to a place where no symbol is and its errors on a position are
+// those of Definition.
 func (ix *Index) Rename(pos agentlsp.Position, name string) (agentlsp.Renaming, error) {
 	ctx := context.Background()
 	q, err := ix.ask(ctx, pos)
@@ -636,12 +639,10 @@ func (ix *Index) rename(ctx context.Context, q question, name string) ([]agentls
 	if _, imported := obj.(*types.PkgName); imported || id == pgf.File.Name {
 		return nil, fmt.Errorf("package %s: %w", id.Name, agentlsp.ErrNotSupported)
 	}
-	abstract, err := isInterface(ctx, q.views[0], q.uri, q.at)
-	if err != nil {
-		return nil, err
+	if _, ok := memberOf(pkg, obj); !ok && obj != nil && obj.Parent() == nil && len(q.views) < len(ix.views) {
+		// targets cannot find it in the views that do not build the file: they would keep the old name.
+		return nil, fmt.Errorf("%s is a field or method of a type without a name at the package level, in a file not every platform builds", id.Name)
 	}
-	_, isFunc := obj.(*types.Func)
-	implemented := abstract && isFunc // a method of an interface type: its implementations are renamed too
 	fh, err := q.views[0].ReadFile(ctx, q.uri)
 	if err != nil {
 		return nil, err
@@ -676,29 +677,6 @@ func (ix *Index) rename(ctx context.Context, q question, name string) ([]agentls
 			if err != nil {
 				return err
 			}
-			var impls []protocol.Location
-			if implemented {
-				if impls, err = gopls.Implementation(ctx, t.snapshot, fh, t.at); err != nil {
-					return err
-				}
-			}
-			for _, impl := range impls {
-				if ix.origin(impl.URI.Path()) != agentlsp.OriginRoot || edited(renamed, impl) {
-					// Code outside the root is not renamed: gopls refuses where a conversion needs it. A method
-					// gopls renamed with the interface method is converted to the interface somewhere: a rename
-					// that starts at it would refuse to break that.
-					continue
-				}
-				fh, err := t.snapshot.ReadFile(ctx, impl.URI)
-				if err != nil {
-					return err
-				}
-				more, err := gopls.Rename(ctx, t.snapshot, fh, impl.Range, name)
-				if err != nil {
-					return err
-				}
-				renamed = append(renamed, more...)
-			}
 			mu.Lock()
 			defer mu.Unlock()
 			changes = append(changes, renamed...)
@@ -711,19 +689,7 @@ func (ix *Index) rename(ctx context.Context, q question, name string) ([]agentls
 	return edits(changes)
 }
 
-// edited reports whether the changes replace the text at loc.
-func edited(changes []protocol.DocumentChange, loc protocol.Location) bool {
-	for _, c := range changes {
-		if c.TextDocumentEdit.TextDocument.URI == loc.URI &&
-			slices.ContainsFunc(protocol.AsTextEdits(c.TextDocumentEdit.Edits), func(e protocol.TextEdit) bool { return e.Range == loc.Range }) {
-			return true
-		}
-	}
-	return false
-}
-
-// edits is the text edits of the changes gopls made, each once, in the order of files, lines and columns. Edits that
-// differ and overlap are an error: the platforms disagree.
+// edits is the text edits of the changes gopls made, each once, in the order of files, lines and columns.
 func edits(changes []protocol.DocumentChange) ([]agentlsp.Edit, error) {
 	ms := mappers{}
 	var out []agentlsp.Edit
@@ -739,14 +705,7 @@ func edits(changes []protocol.DocumentChange) ([]agentlsp.Edit, error) {
 	slices.SortFunc(out, func(a, b agentlsp.Edit) int {
 		return cmp.Or(compareLocations(a.Location, b.Location), strings.Compare(a.NewText, b.NewText))
 	})
-	out = slices.Compact(out)
-	for i := 1; i < len(out); i++ {
-		a, b := out[i-1], out[i]
-		if a.File == b.File && (a.Line == b.Line && a.Column == b.Column || b.Line < a.EndLine || b.Line == a.EndLine && b.Column < a.EndColumn) {
-			return nil, fmt.Errorf("edits of the platforms overlap at %s:%d:%d", b.File, b.Line, b.Column)
-		}
-	}
-	return out, nil
+	return slices.Compact(out), nil
 }
 
 // origin says where the file at path lives.

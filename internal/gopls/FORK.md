@@ -69,8 +69,14 @@
   записывая индекс в `<кэш пользователя>/goimports`; agent-lsp автодополнения не вызывает.
 - `golang/rename.go`: без `renameFuncSignature` и её вызова в `Rename` — смены сигнатуры функции переименованием
   ключевого слова `func`: она вызывает `ChangeSignature` из `change_signature.go`, который тянет `refactor/inline` и
-  `golang.org/x/tools/imports`; без счётчика телеметрии `countRenamePackage`.
+  `golang.org/x/tools/imports`; без счётчика телеметрии `countRenamePackage`. `renameExported` отказывает, если метод,
+  связанный с переименованным присваиванием интерфейсу, объявлен в пакете, который переименование уже прошло или не
+  проходит вовсе (стандартная библиотека, зависимость, пакет, который пакет интерфейса импортирует): upstream оставил бы
+  ему старое имя, и код не собрался бы.
 - `golang/rename_check.go`: место конфликта в ошибке переименования — полный путь файла, а не `каталог/файл.go`.
+  `checkMethod` отказывает переименовать конкретный метод `String() string`, `Error() string` или
+  `Format(fmt.State, rune)` (сам или вместе с методом интерфейса): `fmt` находит их через `any`, тип без такого метода
+  печатается иначе, а `go vet` падает на глаголе, который этот метод обслуживал.
 - `settings/settings.go`: `CounterPath` — свой тип `[]string` вместо `telemetry.CounterPath` (без телеметрии).
 - `util/bug/bug.go`: без счётчика телеметрии `BugReportCount`.
 - `xtools/typesinternal/classify_call.go`: `usedIdent` и `interfaceMethod` — свои тела вместо `go:linkname` на

@@ -803,7 +803,7 @@ func renameExported(pkgs []*cache.Package, declPkgPath PackagePath, declObjPath 
 
 	// Apply the renaming operation to each package.
 	allEdits := make(map[protocol.DocumentURI][]diff.Edit)
-	for _, pkg := range pkgs {
+	for i, pkg := range pkgs {
 
 		// Resolved target objects within package pkg.
 		var objects []types.Object
@@ -845,6 +845,11 @@ func renameExported(pkgs []*cache.Package, declPkgPath PackagePath, declObjPath 
 
 		// Expand the search set?
 		for obj := range moreObjects {
+			// A package visited before or not at all keeps the old name of obj and stops compiling.
+			if !slices.ContainsFunc(pkgs[i:], func(p *cache.Package) bool { return string(p.Metadata().PkgPath) == obj.Pkg().Path() }) {
+				return nil, fmt.Errorf("%s: %s must be renamed too, but the renaming does not reach its package",
+					pkg.FileSet().Position(obj.Pos()), obj)
+			}
 			objpath, err := objectpath.For(obj)
 			if err != nil {
 				continue // not exported

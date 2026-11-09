@@ -93,17 +93,23 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
   and columns. `Unresolved` is empty: every identifier is resolved by types.
 - A symbol declared for each platform apart (`f` in `f_unix.go` and in `f_windows.go`, a method or a field of such a
   type) is one symbol: a question on any of its declarations finds the uses of all of them, and `Rename` renames all
-  of them.
+  of them. A field or method of a type without a name at the package level (`var cfg struct{ n int }` in `x_unix.go`
+  and in `x_windows.go`) is found this way only from a file every platform builds.
 - `Rename` gives the edits that rename the symbol in the packages of the root for all three platforms, joined as
-  `References` joins its answers: an edit more than one platform makes is in the answer once, edits that differ and
-  overlap are an error. Edits come in the order of files, lines and columns and include the name in doc comments.
-  Renaming a method of an interface renames the methods of the root that implement it, whether or not the code
-  converts their types to the interface. `Rename` writes nothing; `Unresolved` is empty.
+  `References` joins its answers: an edit more than one platform makes is in the answer once. Edits come in the order
+  of files, lines and columns and include the name in doc comments. Renaming a method of an interface renames the
+  methods of the types the code converts to the interface, as gopls does; a type that implements the interface and is
+  never converted to it keeps its method. `Rename` writes nothing; `Unresolved` is empty.
 - `Rename` refuses with an error that names the place: a new name that conflicts with another symbol (the places
   gopls reports, with full paths), a symbol declared outside the root (`std`, `module`, `vendor`; the place of the
-  declaration). Renaming a package, at its `package` clause or at an import name, fails with
-  `agentlsp.ErrNotSupported`. Files none of the three platforms builds, such as `x_plan9.go` or a `//go:build ignore`
-  program, are not edited.
+  declaration), a method of a type the code converts to the interface whose method is renamed, declared in a package
+  the renaming does not reach (`time.Time` converted to an interface of the root; the place of the method), a field or
+  method of a type without a name at the package level asked from a file not every platform builds (the place of the
+  question), a method `fmt` finds through `any` — `String() string`, `Error() string`, `Format(fmt.State, rune)` of a
+  concrete type, renamed alone or with an interface method (the place of the method): the type would print otherwise
+  and `go vet` would fail on the verbs it served. Renaming a package, at its `package` clause or at an import name,
+  fails with `agentlsp.ErrNotSupported`.
+  Files none of the three platforms builds, such as `x_plan9.go` or a `//go:build ignore` program, are not edited.
 - A process has one Go index open at a time: `Open` fails until the open one is closed.
 
 ### The cache
@@ -149,13 +155,13 @@ processes keeping the load average at 8–11, on `golang.org/x/tools` v0.47.0. I
 first call, 0.49–0.74 s on the next ones. With two worktrees of the gopls module the cache file is 13 MB after the
 `Definition` calls above and 37 MB after the `References` calls.
 
-`Rename` in the module `golang.org/x/tools`, same machine, load average 6–9, a new process each time:
+`Rename` in the module `golang.org/x/tools`, same machine, load average 6–12, a new process each time:
 
 | Rename | Edits | First call, empty cache | Next call: process (`Rename` alone) |
 |---|---|---|---|
 | `Load` in `go/packages/packages.go` | 160 in 48 files | 1.34 s | 0.26–0.29 s (0.17–0.19 s) |
 | `getFileID` of `internal/robustio`, declared in `robustio_posix.go` and `robustio_windows.go` | 3 in 3 files | 0.85 s | 0.13 s (0.05 s) |
-| the interface method `ssa.Member.Token` and its 4 implementations | 5 in 1 file | 3.2 s | 0.80–1.00 s (0.70–0.90 s) |
+| the interface method `ssa.Member.Token` and its 4 implementations | 5 in 1 file | 1.18 s | 0.32–0.39 s (0.22–0.29 s) |
 
 With the edits of all three made, the module builds and passes `go vet ./...` for linux, darwin and windows;
 `robustio_plan9.go` keeps the old name of `getFileID`, as plan9 is not one of the platforms.
