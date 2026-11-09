@@ -580,7 +580,8 @@ func TestLoadOfAnotherPlatformIsNotReused(t *testing.T) {
 	}
 }
 
-// A root opened through a symlink is walked through it: a file added under it is seen by the next Open. Answers name
+// A root opened through a symlink is walked through it: a file added under it is seen by the next Open, and Rename
+// finds the files no platform builds under it. Answers name
 // files by their paths through the root as Open got it, the paths the positions use.
 func TestSymlinkedRoot(t *testing.T) {
 	cache(t)
@@ -591,12 +592,14 @@ func TestSymlinkedRoot(t *testing.T) {
 
 	var defs []agentlsp.Declaration
 	var syms []agentlsp.Symbol
+	var renameErr error
 	log := session(t, root, func(ix *golang.Index) {
 		var err error
 		defs, err = ix.Definition(place{"main.go", "Add(cart.Item"}.position(t, root))
 		require.NoError(t, err)
 		syms, err = ix.Symbols("Extra")
 		require.NoError(t, err)
+		_, renameErr = ix.Rename(place{cartGo, "MaxItems = 100"}.position(t, root), "Most")
 	})
 
 	assert.Contains(t, log, loaded)
@@ -604,6 +607,8 @@ func TestSymlinkedRoot(t *testing.T) {
 	assert.Equal(t, symbols(t, root, []symbol{{"Extra", "func", "", decl{
 		name: place{"cart/extra.go", "Extra() {}"}, from: "func Extra", to: "func Extra() {}", signature: "func Extra()",
 	}}}), syms)
+	assert.ErrorContains(t, renameErr, "MaxItems is in files none of linux, darwin, windows builds, which the renaming would not edit: "+
+		filepath.Join(root, "cart", "limits_integration_test.go")+":9:5, "+filepath.Join(root, "report", "report.go")+":10:15")
 }
 
 // Close may be called again; the second call does nothing.

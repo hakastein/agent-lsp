@@ -13,19 +13,23 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/scanner"
 	"go/token"
 	"go/types"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
 	agentlsp "github.com/hakastein/agent-lsp"
 	"github.com/hakastein/agent-lsp/internal/cachedb"
 	"github.com/hakastein/agent-lsp/internal/gopls/cache"
+	"github.com/hakastein/agent-lsp/internal/gopls/cache/metadata"
 	"github.com/hakastein/agent-lsp/internal/gopls/cache/parsego"
 	"github.com/hakastein/agent-lsp/internal/gopls/filecache"
 	gopls "github.com/hakastein/agent-lsp/internal/gopls/golang"
@@ -618,8 +622,9 @@ func compareLocations(a, b agentlsp.Location) int {
 // An edit made under more than one platform is in the answer once. Edits come in the order of files, lines and
 // columns. A name that conflicts with another symbol is an error that names the place, as is a symbol declared outside
 // the root (the standard library, a dependency, a vendored copy), a method coupled to the renamed one in a package that
-// does not import the package of the declaration, a method fmt finds through any (String, Error, Format), and, asked from a file not every
-// platform builds, a field or method of a type without a name at the package level; a package is not supported.
+// does not import the package of the declaration, a method fmt finds through any (String, Error, Format), the old name
+// in a file no platform builds (see unbuilt), and, asked from a file not every platform builds, a field or method of a
+// type without a name at the package level; a package is not supported.
 // Unresolved is empty, as in References. Its answer to a place where no symbol is and its errors on a position are
 // those of Definition.
 func (ix *Index) Rename(pos agentlsp.Position, name string) (agentlsp.Renaming, error) {
@@ -668,6 +673,16 @@ func (ix *Index) rename(ctx context.Context, q question, name string) ([]agentls
 			return nil, fmt.Errorf("%s is declared outside the root (%s) at %s:%d:%d", id.Name, origin, d.File, d.Line, d.Column)
 		}
 	}
+	if len(decls) > 0 {
+		files, err := ix.unbuilt(obj, filepath.Dir(decls[0].File))
+		if err != nil {
+			return nil, err
+		}
+		if files != nil {
+			return nil, fmt.Errorf("%s is in files none of %s builds, which the renaming would not edit: %s", id.Name,
+				strings.Join(platforms, ", "), strings.Join(files, ", "))
+		}
+	}
 	targets, err := ix.targets(ctx, q)
 	if err != nil {
 		return nil, err
@@ -714,6 +729,104 @@ func edits(changes []protocol.DocumentChange) ([]agentlsp.Edit, error) {
 		return cmp.Or(compareLocations(a.Location, b.Location), strings.Compare(a.NewText, b.NewText))
 	})
 	return slices.Compact(out), nil
+}
+
+// unbuilt is the place of the first use of the name of obj, path:line:column, in each .go file of the root none of
+// the platforms builds and that can name obj: a file of its package (in dir, with its package name), or a file that
+// imports the package, where a symbol at the package level is named only as import.Name. Such files are those the go
+// command finds under a pattern "./..." of each module of the root and no view has in a package: an x_plan9.go file, a
+// file under a build tag (a test of //go:build integration), a //go:build ignore program, and the files of a directory
+// none of whose files any platform builds. A use is an identifier token, not a word of a comment or a string. A symbol
+// inside a function has none.
+//
+// shortcut: a field or method used in a file that names it through a value of another package, without importing
+// its package, is not found; walk the importers of the package when such a file shows up.
+func (ix *Index) unbuilt(obj types.Object, dir string) ([]string, error) {
+	pkg := obj.Pkg()
+	atTop := obj.Parent() == pkg.Scope()
+	if obj.Parent() != nil && !atTop {
+		return nil, nil
+	}
+	var graphs []*metadata.Graph
+	for _, v := range ix.views {
+		graphs = append(graphs, v.snapshot.MetadataGraph())
+	}
+	tops := ix.mods
+	if tops == nil {
+		tops = []string{ix.root}
+	}
+	var out []string
+	for _, top := range tops {
+		real, err := filepath.EvalSymlinks(top) // WalkDir does not follow a root that is a symlink
+		if err != nil {
+			return nil, err
+		}
+		err = filepath.WalkDir(real, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				if p == real {
+					return err
+				}
+				return nil // the go command does not list what it cannot read either
+			}
+			name := d.Name()
+			if d.IsDir() {
+				if p != real && (skipped(name) || name == "vendor" || exists(filepath.Join(p, "go.mod"))) {
+					return filepath.SkipDir // a nested module is not of the module
+				}
+				return nil
+			}
+			rel, _ := filepath.Rel(real, p)
+			path := filepath.Join(top, rel)
+			uri := protocol.URIFromPath(path)
+			if skipped(name) || !strings.HasSuffix(name, ".go") ||
+				slices.ContainsFunc(graphs, func(g *metadata.Graph) bool { return len(g.ForFile[uri]) > 0 }) {
+				return nil
+			}
+			src, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			f, _ := parser.ParseFile(token.NewFileSet(), path, src, parser.ImportsOnly) // a broken clause names no package
+			qualifier, names := "", filepath.Dir(path) == dir && f.Name.Name == pkg.Name()
+			for _, imp := range f.Imports {
+				if p, _ := strconv.Unquote(imp.Path.Value); p == pkg.Path() && !names {
+					names, qualifier = true, pkg.Name()
+					if imp.Name != nil {
+						qualifier = imp.Name.Name
+					}
+				}
+			}
+			if !names {
+				return nil
+			}
+			if !atTop || qualifier == "." {
+				qualifier = ""
+			}
+			file := token.NewFileSet().AddFile(path, -1, len(src))
+			var s scanner.Scanner
+			s.Init(file, src, nil, 0)
+			var before [2]string // the two tokens before: an identifier by its name, another token by its kind
+			for {
+				at, tok, lit := s.Scan()
+				if tok == token.EOF {
+					return nil
+				}
+				if tok == token.IDENT && lit == obj.Name() && (qualifier == "" || before == [2]string{qualifier, "."}) {
+					pos := file.PositionFor(at, false)
+					out = append(out, fmt.Sprintf("%s:%d:%d", path, pos.Line, pos.Column))
+					return nil
+				}
+				if tok != token.IDENT {
+					lit = tok.String()
+				}
+				before = [2]string{before[1], lit}
+			}
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // Origin says where the file at the absolute path lives, by the rule of the Origin of a Declaration: under the root
