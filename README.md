@@ -120,9 +120,11 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
   they would keep it (each such file with the place of its first use, `path:line:column`). A use there is an
   identifier, not a word of a comment or a string, in a file that can name the symbol: a file of its package (same
   directory and `package` name) or a file that imports the package, where a symbol at the package level counts only as
-  `import.Name`. Files are those `./...` of each module of the root finds (no `testdata`, `vendor`, directories
-  starting with `.` or `_`, nested modules); a `package main` generator with a symbol of its own name does not stop the
-  renaming. A field or method named through a value in a file that does not import its package is not found.
+  `import.Name`, and a field or method counts as any identifier of its name, a field of another type too (renaming
+  `Package.Name` in `golang.org/x/tools` is refused for `decl.Name.Name` in a `//go:build ignore` program). Files are
+  those `./...` of each module of the root finds (no `testdata`, `vendor`, directories starting with `.` or `_`, nested
+  modules); a `package main` generator with a symbol of its own name does not stop the renaming. A field or method
+  named through a value in a file that does not import its package is not found.
   Renaming a package, at its `package` clause or at an import name, fails with `agentlsp.ErrNotSupported`.
 - A process has one Go index open at a time: `Open` fails until the open one is closed.
 

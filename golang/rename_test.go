@@ -64,8 +64,10 @@ func TestRename(t *testing.T) {
 			{saveGo, "path())"}, {storeOtherGo, "path is the file"}, {storeOtherGo, "path() string"},
 			{storeWindowsGo, "path is the file"}, {storeWindowsGo, "path() string"}, {storeWindowsGo, "path()+"},
 		}},
-		{"files no platform builds without the name: in a comment, a string, another package, not after the import name",
+		{"files no platform builds without the name: in a comment, a string, another package, of the same name too, not after the import name",
 			place{cartGo, "MinItems = 0"}, "Least", []place{{cartGo, "MinItems = 0"}}},
+		{"local variable with the name of a local in a file no platform builds", place{"cart/save_other_test.go", "t *testing"}, "tb",
+			[]place{{"cart/save_other_test.go", "t *testing"}, {"cart/save_other_test.go", "t.Fatal"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
