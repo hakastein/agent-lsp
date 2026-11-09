@@ -202,6 +202,40 @@ func TestModuleRootUnderGoWorkAbove(t *testing.T) {
 	}}), got)
 }
 
+// Origin of a file follows the rule of the Origin of a Declaration; the file need not exist.
+func TestOrigin(t *testing.T) {
+	cache(t)
+	testdata := filepath.Dir(newRoot(t))
+	goroot, modcache := goEnv(t, "GOROOT"), goEnv(t, "GOMODCACHE")
+
+	tests := []struct {
+		name string
+		root string // under testdata
+		path string
+		want agentlsp.Origin
+	}{
+		{"file of the root", "shop", filepath.Join(testdata, "shop", "cart", "cart.go"), agentlsp.OriginRoot},
+		{"module the go.work of the root uses outside it", "work", filepath.Join(testdata, "money", "money.go"), agentlsp.OriginRoot},
+		{"module a go.work above the root uses", "work/app", filepath.Join(testdata, "money", "money.go"), agentlsp.OriginModule},
+		{"directory a replace names", "shop", filepath.Join(testdata, "money", "money.go"), agentlsp.OriginModule},
+		{"vendor directory of the root", "vendored", filepath.Join(testdata, "vendored", "vendor", "example.com", "money", "money.go"),
+			agentlsp.OriginVendor},
+		{"standard library", "shop", filepath.Join(goroot, "src", "fmt", "print.go"), agentlsp.OriginStd},
+		{"module cache", "shop", filepath.Join(modcache, "example.com", "money@v1.0.0", "money.go"), agentlsp.OriginModule},
+	}
+	var got []agentlsp.Origin
+	for _, tt := range tests {
+		session(t, filepath.Join(testdata, filepath.FromSlash(tt.root)), func(ix *golang.Index) {
+			got = append(got, ix.Origin(tt.path))
+		})
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, got[i])
+		})
+	}
+}
+
 // A position that is not a place in a file of the root is an error of Definition and References alike.
 func TestPositionErrors(t *testing.T) {
 	cache(t)

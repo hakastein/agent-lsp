@@ -76,6 +76,8 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
 - A module the `go.work` of the root uses is a part of the root also when its directory is outside the root
   (`use ../lib`): a position in its files is a question, `Outline` and `Rename` work on them, and its declarations
   have the `Origin` of the root. A directory a `replace` names stays a dependency (`module`).
+- `Index.Origin(path)` is the `Origin` of the file at the absolute path by the rule of the `Origin` of a declaration,
+  for the locations of `References` and `Rename` too. The file need not exist.
 - The packages of the root are loaded for each of `linux`, `darwin` and `windows`, whatever `GOOS` the environment
   sets (`GOARCH` is the one of the environment), so a file built for one of them only, such as `x_windows.go`, is
   answered about. A `.go` file none of them builds (another `GOOS`, a build tag) is an error of `Definition`,

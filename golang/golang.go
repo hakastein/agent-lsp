@@ -282,7 +282,7 @@ func (ix *Index) declarationAt(loc protocol.Location) (agentlsp.Declaration, err
 		text, _, _ := strings.Cut(string(s.src[bytes.LastIndexByte(s.src[:start], '\n')+1:]), "\n")
 		d = agentlsp.Declaration{Location: l, Range: l, Signature: strings.TrimSpace(text)}
 	}
-	d.Origin = ix.origin(s.path)
+	d.Origin = ix.Origin(s.path)
 	return d, nil
 }
 
@@ -329,7 +329,7 @@ func (ix *Index) Symbols(name string) ([]agentlsp.Symbol, error) {
 				full = sym.Container + "." + full
 			}
 			if matches(pkg.pkgName+"."+full, name) || matches(pkg.pkgPath+"."+full, name) {
-				sym.Origin = ix.origin(path)
+				sym.Origin = ix.Origin(path)
 				out = append(out, sym)
 			}
 		}
@@ -355,7 +355,7 @@ func (ix *Index) Outline(file string) ([]agentlsp.Symbol, error) {
 	}
 	syms := s.symbols()
 	for i := range syms {
-		syms[i].Origin = ix.origin(file)
+		syms[i].Origin = ix.Origin(file)
 	}
 	return syms, nil
 }
@@ -664,7 +664,7 @@ func (ix *Index) rename(ctx context.Context, q question, name string) ([]agentls
 		return nil, err
 	}
 	for _, d := range decls {
-		if origin := ix.origin(d.File); origin != agentlsp.OriginRoot {
+		if origin := ix.Origin(d.File); origin != agentlsp.OriginRoot {
 			return nil, fmt.Errorf("%s is declared outside the root (%s) at %s:%d:%d", id.Name, origin, d.File, d.Line, d.Column)
 		}
 	}
@@ -716,8 +716,10 @@ func edits(changes []protocol.DocumentChange) ([]agentlsp.Edit, error) {
 	return slices.Compact(out), nil
 }
 
-// origin says where the file at path lives.
-func (ix *Index) origin(path string) agentlsp.Origin {
+// Origin says where the file at the absolute path lives, by the rule of the Origin of a Declaration: under the root
+// (a module the go.work of the root uses is a part of it), under a vendor directory of the root, under GOROOT, or
+// elsewhere, as a dependency. The file need not exist.
+func (ix *Index) Origin(path string) agentlsp.Origin {
 	if home := ix.home(path); under(home, path) {
 		if slices.Contains(strings.Split(filepath.ToSlash(path[len(home):]), "/"), "vendor") {
 			return agentlsp.OriginVendor
