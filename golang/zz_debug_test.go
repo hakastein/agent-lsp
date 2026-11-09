@@ -12,11 +12,10 @@ import (
 
 // DEBUG
 func TestZZDebugCwd(t *testing.T) {
-	for _, variant := range []string{"pkgdir", "empty", "mod", "work", "root"} {
+	for _, variant := range []string{"pkgdir", "work"} {
 		for _, rootName := range []string{"vendored", "shop"} {
 			t.Run(variant+"/"+rootName, func(t *testing.T) {
 				cache(t)
-				t.Setenv("AGENTLSP_DBG", "1")
 				testdata := filepath.Dir(newRoot(t))
 				root := filepath.Join(testdata, rootName)
 				side := filepath.Join(testdata, "side")
@@ -43,6 +42,12 @@ func TestZZDebugCwd(t *testing.T) {
 					}
 					got, err := ix.Definition(p.position(t, root))
 					t.Logf("RESULT %s/%s def=%d %+v err=%v", variant, rootName, len(got), got, err)
+					refs, err := ix.References(p.position(t, root))
+					t.Logf("RESULT %s/%s refs=%d err=%v", variant, rootName, len(refs.Uses), err)
+					ren, err := ix.Rename(place{"main.go", "main()"}.position(t, root), "main2")
+					t.Logf("RESULT %s/%s rename=%+v err=%v", variant, rootName, ren, err)
+					syms, err := ix.Symbols("main")
+					t.Logf("RESULT %s/%s syms=%d err=%v", variant, rootName, len(syms), err)
 				})
 				t.Logf("LOG %s", log)
 			})
