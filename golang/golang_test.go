@@ -124,7 +124,7 @@ func TestDefinitionInVendor(t *testing.T) {
 func TestDefinitionFromAnotherWorkingDirectory(t *testing.T) {
 	cache(t)
 	testdata := filepath.Dir(newRoot(t))
-	t.Chdir(filepath.Join(testdata, "work")) // its go.work uses neither root
+	t.Chdir(filepath.Join(testdata, "elsewhere")) // a module with a go.work of its own beside the roots
 
 	tests := []struct {
 		name string
