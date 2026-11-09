@@ -546,7 +546,7 @@ func TestLoadOfAnotherPlatformIsNotReused(t *testing.T) {
 // files by their paths through the root as Open got it, the paths the positions use.
 func TestSymlinkedRoot(t *testing.T) {
 	cache(t)
-	root := filepath.Join(t.TempDir(), "shop")
+	root := filepath.Join(tempDir(t), "shop")
 	symlink(t, newRoot(t), root)
 	session(t, root, func(*golang.Index) {})
 	require.NoError(t, os.WriteFile(filepath.Join(root, "cart", "extra.go"), []byte("package cart\n\nfunc Extra() {}\n"), 0o600))
