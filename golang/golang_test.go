@@ -41,6 +41,7 @@ var (
 func TestDefinition(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
+	writeBroken(t, root)
 
 	tests := []struct {
 		name string
@@ -63,6 +64,10 @@ func TestDefinition(t *testing.T) {
 			signature: "type Amount int64", doc: "// Amount is a sum in cents.", origin: agentlsp.OriginModule,
 		}}},
 		{"whitespace", place{"main.go", "\tbasket.Add"}, nil},
+		{"file with a syntax error", place{brokenGo, "Ready() {}"}, []decl{{
+			name: place{brokenGo, "Ready() {}"}, from: "func Ready", to: "func Ready() {}", signature: "func Ready()",
+			doc: "// Ready is complete.",
+		}}},
 	}
 	var got [][]agentlsp.Declaration
 	session(t, root, func(ix *golang.Index) {
@@ -112,6 +117,46 @@ func TestDefinitionInVendor(t *testing.T) {
 		name: place{"vendor/example.com/money/money.go", "Amount int64"}, from: "type Amount int64", to: "type Amount int64",
 		signature: "type Amount int64", doc: "// Amount is a sum in cents.", origin: agentlsp.OriginVendor,
 	}}), got)
+}
+
+// A module the go.work of the root uses outside its directory is a part of the root, as a module under it is: a
+// position in it is asked about, its declarations are of the root, Rename edits it.
+func TestModuleOfGoWorkOutsideTheRoot(t *testing.T) {
+	cache(t)
+	root := filepath.Join(filepath.Dir(newRoot(t)), "work")
+	const moneyGo = "../money/money.go"
+	amount := decl{
+		name: place{moneyGo, "Amount int64"}, from: "type Amount int64", to: "type Amount int64",
+		signature: "type Amount int64", doc: "// Amount is a sum in cents.",
+	}
+	plus := decl{
+		name: place{moneyGo, "Plus(b Amount)"}, from: "func (a Amount) Plus", to: "return a + b }",
+		signature: "func (a Amount) Plus(b Amount) Amount", doc: "// Plus is the sum of a and b.",
+	}
+	call := place{"app/main.go", "Plus(1)"}
+	var defs []agentlsp.Declaration
+	var refs agentlsp.References
+	var renaming agentlsp.Renaming
+	var syms, outline []agentlsp.Symbol
+	session(t, root, func(ix *golang.Index) {
+		var err error
+		defs, err = ix.Definition(call.position(t, root))
+		require.NoError(t, err)
+		refs, err = ix.References(plus.name.position(t, root))
+		require.NoError(t, err)
+		renaming, err = ix.Rename(plus.name.position(t, root), "Add")
+		require.NoError(t, err)
+		syms, err = ix.Symbols("money.Amount.Plus")
+		require.NoError(t, err)
+		outline, err = ix.Outline(filepath.Join(root, filepath.FromSlash(moneyGo)))
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, declarations(t, root, []decl{plus}), defs)
+	assert.Equal(t, agentlsp.References{Uses: locations(t, root, []place{call})}, refs)
+	assert.Equal(t, agentlsp.Renaming{Edits: renames(t, root, []place{{moneyGo, "Plus is"}, plus.name, call}, "Add")}, renaming)
+	assert.Equal(t, symbols(t, root, []symbol{{"Plus", "method", "Amount", plus}}), syms)
+	assert.Equal(t, symbols(t, root, []symbol{{"Amount", "type", "", amount}, {"Plus", "method", "Amount", plus}}), outline)
 }
 
 // A position that is not a place in a file of the root is an error of Definition and References alike.
@@ -214,6 +259,7 @@ func TestReferences(t *testing.T) {
 func TestSymbols(t *testing.T) {
 	cache(t)
 	root := newRoot(t)
+	writeBroken(t, root)
 	addMethod := symbol{"Add", "method", "Cart", add}
 	itemPrice := symbol{"Price", "field", "Item", decl{
 		name: place{cartGo, "Price money.Amount"}, from: "Price money.Amount", to: "Price money.Amount",
@@ -250,6 +296,9 @@ func TestSymbols(t *testing.T) {
 		}}}},
 		{"dependency is not searched", "Plus", nil},
 		{"wrong type", "Item.Add", nil},
+		{"function cut short at the end of the file", "Broken", []symbol{{"Broken", "func", "", decl{
+			name: place{brokenGo, "Broken("}, from: "func Broken", to: "( {\n", signature: "func Broken( {",
+		}}}},
 	}
 	var got [][]agentlsp.Symbol
 	session(t, root, func(ix *golang.Index) {
