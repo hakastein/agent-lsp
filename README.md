@@ -73,6 +73,9 @@ ren, err := ix.Rename(pos, "Put")         // ren.Edits, ren.Unresolved
 Package `golang` answers about the Go code of a root: a directory with `go.mod` or `go.work`. It calls a fork of the
 internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.md`](internal/gopls/FORK.md)).
 
+- A module the `go.work` of the root uses is a part of the root also when its directory is outside the root
+  (`use ../lib`): a position in its files is a question, `Outline` and `Rename` work on them, and its declarations
+  have the `Origin` of the root. A directory a `replace` names stays a dependency (`module`).
 - The packages of the root are loaded for each of `linux`, `darwin` and `windows`, whatever `GOOS` the environment
   sets (`GOARCH` is the one of the environment), so a file built for one of them only, such as `x_windows.go`, is
   answered about. A `.go` file none of them builds (another `GOOS`, a build tag) is an error of `Definition`,
@@ -83,7 +86,8 @@ internal packages of gopls directly, with no LSP server ([`internal/gopls/FORK.m
 - `Symbols` searches the packages of the root for all three platforms, test files included; dependencies are not
   searched. It gives all six kinds.
 - `Outline` lists the declarations of a file in order: functions, methods, types, the fields of struct types and the
-  methods of interface types, top-level variables and constants. It reads the syntax of the file only.
+  methods of interface types, top-level variables and constants. It reads the syntax of the file only; a file with
+  syntax errors gives what the parser recovers, and a declaration the file cuts short ends at the end of the file.
 - `References` gives the uses of the symbol in the packages of the root and, in `Implementations`, the types and
   methods that implement an interface type or a method of one; for a concrete type or method that list is empty. The
   declaration itself is not a use, and a question on a use and on the declaration gets the same answer. The answers

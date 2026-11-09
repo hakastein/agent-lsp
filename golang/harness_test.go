@@ -170,6 +170,16 @@ func symbols(t *testing.T, root string, syms []symbol) []agentlsp.Symbol {
 	return out
 }
 
+// brokenGo is a file of package cart an edit has left with a syntax error: a function cut short at the end of the file.
+// It is not in testdata, since go vet of the root fails on it: writeBroken writes it.
+const brokenGo = "cart/broken.go"
+
+func writeBroken(t *testing.T, root string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(root, filepath.FromSlash(brokenGo)),
+		[]byte("package cart\n\n// Ready is complete.\nfunc Ready() {}\n\nfunc Broken( {\n"), 0o600))
+}
+
 // edit replaces old, which must stand once in the file, with new.
 func edit(t *testing.T, root, file, old, new string) {
 	t.Helper()

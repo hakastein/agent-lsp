@@ -6,6 +6,7 @@
 package golang
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -55,6 +56,7 @@ var platforms = []string{"linux", "darwin", "windows"}
 // Index answers questions about the Go code of one root.
 type Index struct {
 	root  string
+	mods  []string // the directories of the modules the go.work of the root uses, also outside it; none for a module root
 	env   cache.GoEnv
 	logf  func(string, ...any)
 	views []view // one per platform, in their order; nil once closed
@@ -75,8 +77,10 @@ func (v view) close() {
 
 // Open opens the Go code of root, a directory with a go.mod or a go.work file, and loads its packages for each of
 // linux, darwin and windows, whatever GOOS the environment sets: the stored list of packages when the files it depends
-// on are the same, the go command otherwise. A process has one Go index
-// open at a time; Open fails while another is. logf, if not nil, receives diagnostic lines; they are not a contract.
+// on are the same, the go command otherwise. A module the go.work of root uses outside root is a part of the root: its
+// files are asked about and renamed, its declarations are of the root. A go.work of a directory above a root with a
+// go.mod adds nothing to the root: its other modules are dependencies. A process has one Go index open at a time; Open
+// fails while another is. logf, if not nil, receives diagnostic lines; they are not a contract.
 func Open(root string, logf func(format string, args ...any)) (*Index, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -158,7 +162,13 @@ func openIndex(root string, logf func(string, ...any)) (_ *Index, err error) {
 	} else {
 		logf("go: packages reused: %d", reused)
 	}
-	return &Index{root: root, env: *env, logf: logf, views: views, db: db}, nil
+	var mods []string
+	if exists(filepath.Join(root, "go.work")) { // a go.work of a directory above the module root is not of the root
+		for _, mod := range views[0].snapshot.View().ModFiles() {
+			mods = append(mods, filepath.Dir(mod.Path()))
+		}
+	}
+	return &Index{root: root, mods: mods, env: *env, logf: logf, views: views, db: db}, nil
 }
 
 // Close writes what the gopls cache computed to the cache database and closes it. A second Close does nothing.
@@ -188,7 +198,7 @@ type question struct {
 // ask checks pos, as every language does, and finds the platforms that build its file. A file that is not a .go file
 // gives no views: no symbol is there. A .go file no platform builds is an error.
 func (ix *Index) ask(ctx context.Context, pos agentlsp.Position) (question, error) {
-	src, err := position.Check(ix.root, pos)
+	src, err := position.Check(ix.home(pos.File), pos)
 	if err != nil {
 		return question{}, fmt.Errorf("go: position %s:%d:%d: %w", pos.File, pos.Line, pos.Column, err)
 	}
@@ -266,12 +276,10 @@ func (ix *Index) declarationAt(loc protocol.Location) (agentlsp.Declaration, err
 	if err != nil {
 		return agentlsp.Declaration{}, err
 	}
-	tok := s.fset.File(s.file.Pos())
-	d, ok := s.definition(tok.Pos(start))
+	d, ok := s.definition(s.tok.Pos(start))
 	if !ok {
-		l := s.location(tok.Pos(start), tok.Pos(end))
-		line := s.src[tok.LineStart(l.Line)-token.Pos(tok.Base()):]
-		text, _, _ := strings.Cut(string(line), "\n")
+		l := s.location(s.tok.Pos(start), s.tok.Pos(end))
+		text, _, _ := strings.Cut(string(s.src[bytes.LastIndexByte(s.src[:start], '\n')+1:]), "\n")
 		d = agentlsp.Declaration{Location: l, Range: l, Signature: strings.TrimSpace(text)}
 	}
 	d.Origin = ix.origin(s.path)
@@ -338,7 +346,7 @@ func matches(qualified, name string) bool {
 // the fields of struct types and the methods of interface types, variables and constants. A file that is not a file
 // of the root is an error.
 func (ix *Index) Outline(file string) ([]agentlsp.Symbol, error) {
-	if _, err := position.Check(ix.root, agentlsp.Position{File: file, Line: 1, Column: 1}); err != nil {
+	if _, err := position.Check(ix.home(file), agentlsp.Position{File: file, Line: 1, Column: 1}); err != nil {
 		return nil, fmt.Errorf("go: outline %s: %w", file, err)
 	}
 	s, err := parse(file)
@@ -710,8 +718,8 @@ func edits(changes []protocol.DocumentChange) ([]agentlsp.Edit, error) {
 
 // origin says where the file at path lives.
 func (ix *Index) origin(path string) agentlsp.Origin {
-	if under(ix.root, path) {
-		if slices.Contains(strings.Split(filepath.ToSlash(path[len(ix.root):]), "/"), "vendor") {
+	if home := ix.home(path); under(home, path) {
+		if slices.Contains(strings.Split(filepath.ToSlash(path[len(home):]), "/"), "vendor") {
 			return agentlsp.OriginVendor
 		}
 		return agentlsp.OriginRoot
@@ -720,6 +728,17 @@ func (ix *Index) origin(path string) agentlsp.Origin {
 		return agentlsp.OriginStd
 	}
 	return agentlsp.OriginModule
+}
+
+// home is the directory of the root path is in: the directory of the module of the root that holds it, the root for
+// none.
+func (ix *Index) home(path string) string {
+	for _, dir := range ix.mods {
+		if under(dir, path) {
+			return dir
+		}
+	}
+	return ix.root
 }
 
 // under reports whether path is under dir.
@@ -735,8 +754,10 @@ func parse(path string) (source, error) {
 		return source{}, err
 	}
 	fset := token.NewFileSet()
-	file, _ := parser.ParseFile(fset, path, src, parser.ParseComments|parser.SkipObjectResolution)
-	return source{path: path, src: src, fset: fset, file: file}, nil
+	s := source{path: path, src: src, m: protocol.NewMapper(protocol.URIFromPath(path), src)}
+	s.file, _ = parser.ParseFile(fset, path, src, parser.ParseComments|parser.SkipObjectResolution)
+	fset.Iterate(func(f *token.File) bool { s.tok = f; return false }) // also for a file without a package clause
+	return s, nil
 }
 
 func exists(path string) bool {

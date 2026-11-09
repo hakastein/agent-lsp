@@ -1,7 +1,6 @@
 package golang
 
 import (
-	"bytes"
 	"go/ast"
 	"go/token"
 	"strings"
@@ -9,25 +8,34 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 
 	agentlsp "github.com/hakastein/agent-lsp"
+	"github.com/hakastein/agent-lsp/internal/gopls/protocol"
 )
 
 // source is a parsed file and its text.
 type source struct {
 	path string
 	src  []byte
-	fset *token.FileSet
+	// tok turns the positions of file into offsets; its Offset takes a position past the end of the file for the end:
+	// the parser ends a node the file cuts short, such as a function without its closing parenthesis, past it. Its
+	// lines end where the parser stopped, such as at an error in the package clause: m gives every line and column.
+	tok *token.File
+	// m gives the lines and columns of offsets in src, as for the places gopls gives, also of the end of a file that
+	// ends with a line break: the start of the line after it.
+	m    *protocol.Mapper
 	file *ast.File
 }
 
 // location is the range of [pos, end) in the file.
 func (s source) location(pos, end token.Pos) agentlsp.Location {
-	p, e := s.fset.Position(pos), s.fset.Position(end)
-	return agentlsp.Location{File: s.path, Line: p.Line, Column: p.Column, EndLine: e.Line, EndColumn: e.Column}
+	l := agentlsp.Location{File: s.path}
+	l.Line, l.Column = s.m.OffsetLineCol8(s.tok.Offset(pos))
+	l.EndLine, l.EndColumn = s.m.OffsetLineCol8(s.tok.Offset(end))
+	return l
 }
 
 // text is the source text of [pos, end).
 func (s source) text(pos, end token.Pos) string {
-	return string(s.src[s.fset.Position(pos).Offset:s.fset.Position(end).Offset])
+	return string(s.src[s.tok.Offset(pos):s.tok.Offset(end)])
 }
 
 // firstLine is the first line of the source text of node, without trailing white space.
@@ -159,16 +167,17 @@ func (s source) definition(pos token.Pos) (agentlsp.Declaration, bool) {
 
 // contains reports whether the name at l covers pos.
 func (s source) contains(l agentlsp.Location, pos token.Pos) bool {
-	p := s.fset.Position(pos)
-	return l.Line == p.Line && l.Column <= p.Column && p.Column <= l.EndColumn
+	line, column := s.m.OffsetLineCol8(s.tok.Offset(pos))
+	return l.Line == line && l.Column <= column && column <= l.EndColumn
 }
 
 // funcSignature is the text of a function declaration without its body.
 func (s source) funcSignature(decl *ast.FuncDecl) string {
-	if decl.Body == nil {
-		return s.text(decl.Pos(), decl.End())
+	end := decl.End()
+	if decl.Body != nil {
+		end = decl.Body.Lbrace
 	}
-	return string(bytes.TrimRight([]byte(s.text(decl.Pos(), decl.Body.Lbrace)), " \t\r\n"))
+	return strings.TrimRight(s.text(decl.Pos(), end), " \t\r\n")
 }
 
 // typeSignature is "type T struct" or "type T interface" for a struct or interface type, with the type parameters,

@@ -30,7 +30,7 @@ func (c *Cart) Add(it Item) {
 func (c *Cart) Total() money.Amount { return c.total }
 
 func (c *Cart) String() string {
-	return fmt.Sprintf("%d items", len(c.Items))
+	return fmt.Sprintf("%d товаров", len(c.Items))
 }
 
 // Limits of a cart.
